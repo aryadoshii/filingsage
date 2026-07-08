@@ -5,6 +5,7 @@ zero configuration; a local `.env` file overrides them for host-side runs.
 """
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,6 +20,13 @@ class Settings(BaseSettings):
     # SEC EDGAR fair-access policy requires a declared User-Agent with a
     # real contact. Used by the EDGAR connector; must be set before ingestion.
     sec_contact_email: str = "change-me@example.com"
+
+    # Local data lake root (gitignored). Prod uses R2 — same layout, different root.
+    data_dir: Path = Path("data")
+
+    @property
+    def bronze_dir(self) -> Path:
+        return self.data_dir / "bronze"
 
 
 @lru_cache

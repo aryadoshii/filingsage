@@ -1,1 +1,5 @@
-# SourceConnector ABC + EdgarConnector land here (Day 1, task 3).
+from filingsage.connectors.base import SourceConnector
+from filingsage.connectors.edgar import EdgarClient, EdgarConnector, UnknownTickerError
+from filingsage.connectors.models import FilingRef
+
+__all__ = ["SourceConnector", "EdgarClient", "EdgarConnector", "FilingRef", "UnknownTickerError"]
