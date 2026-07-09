@@ -23,6 +23,7 @@ from filingsage.connectors.models import FilingRef
 
 TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
+ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{document}"
 DEFAULT_FORMS: tuple[str, ...] = ("10-K", "10-Q", "8-K")
 RETRYABLE_STATUSES = frozenset({403, 429, 500, 502, 503, 504})
 
@@ -83,13 +84,13 @@ class EdgarClient:
             transport=transport,
         )
 
-    def get_json(self, url: str) -> dict:
+    def _request(self, url: str) -> httpx.Response:
         backoff = 1.0
         for attempt in range(1, self._max_retries + 1):
             self._limiter.wait()
             resp = self._client.get(url)
             if resp.status_code == 200:
-                return resp.json()
+                return resp
             if resp.status_code in RETRYABLE_STATUSES and attempt < self._max_retries:
                 retry_after = resp.headers.get("Retry-After", "")
                 if retry_after.replace(".", "", 1).isdigit():
@@ -101,6 +102,12 @@ class EdgarClient:
                 continue
             resp.raise_for_status()
         raise RuntimeError("unreachable: retry loop exits via return or raise")
+
+    def get_json(self, url: str) -> dict:
+        return self._request(url).json()
+
+    def get_bytes(self, url: str) -> bytes:
+        return self._request(url).content
 
 
 class EdgarConnector(SourceConnector):
@@ -168,6 +175,36 @@ class EdgarConnector(SourceConnector):
                     )
                 )
         return found
+
+    def bronze_path(self, ref: FilingRef) -> Path:
+        """Immutable bronze location: keyed by accession number (spec §5)."""
+        return self._bronze / "filings" / ref.accession_number / ref.primary_document
+
+    def fetch_raw(self, ref: FilingRef) -> Path:
+        """Fetch the primary document into immutable, accession-keyed bronze.
+
+        Idempotent by design, and the existence check runs BEFORE any network
+        call: bronze is immutable and the accession number is EDGAR's global
+        primary key, so a re-fetch can never produce different bytes worth
+        having — skipping saves rate-limit budget.
+
+        The write is atomic (tmp file + rename): a crash mid-write can never
+        leave a truncated document that a later run mistakes for real bronze.
+        """
+        dest = self.bronze_path(ref)
+        if dest.exists():
+            return dest
+        url = ARCHIVES_URL.format(
+            cik=ref.cik,
+            accession_nodash=ref.accession_number.replace("-", ""),
+            document=ref.primary_document,
+        )
+        payload = self._client.get_bytes(url)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        tmp.write_bytes(payload)
+        tmp.replace(dest)  # atomic on POSIX
+        return dest
 
     def _write_bronze(self, rel: Path, payload: dict) -> Path:
         """Snapshot raw API responses to bronze.

@@ -33,6 +33,8 @@ SUBMISSIONS_FIXTURE = {
     },
 }
 
+FAKE_FILING = b"<html><body>Item 1A. Risk Factors ...</body></html>"
+
 
 class Recorder:
     """MockTransport handler that records requests; can fail first submissions call."""
@@ -51,6 +53,8 @@ class Recorder:
                 self._to_fail -= 1
                 return httpx.Response(429, headers={"Retry-After": "0"})
             return httpx.Response(200, json=SUBMISSIONS_FIXTURE)
+        if "/Archives/" in url:
+            return httpx.Response(200, content=FAKE_FILING)
         return httpx.Response(404)
 
     def count(self, fragment: str) -> int:
@@ -135,3 +139,27 @@ def test_rate_limiter_spaces_calls():
     assert len(sleeps) == 2
     assert 0.4 <= sleeps[0] <= 0.5
     assert sleeps[1] > sleeps[0]
+
+
+def test_fetch_raw_writes_bronze_and_is_idempotent(tmp_path):
+    connector, handler, _ = make_connector(tmp_path)
+    ref = connector.discover(["AAPL"])[0]
+
+    path = connector.fetch_raw(ref)
+    assert path == tmp_path / "bronze" / "filings" / ref.accession_number / ref.primary_document
+    assert path.read_bytes() == FAKE_FILING
+    assert not list(path.parent.glob("*.tmp"))  # atomic write left no debris
+
+    requests_before = len(handler.requests)
+    path_again = connector.fetch_raw(ref)      # second fetch: cache hit
+    assert path_again == path
+    assert len(handler.requests) == requests_before  # zero new network calls
+
+
+def test_fetch_raw_builds_archives_url_without_dashes(tmp_path):
+    connector, handler, _ = make_connector(tmp_path)
+    ref = connector.discover(["AAPL"])[0]
+    connector.fetch_raw(ref)
+    archive_urls = [str(r.url) for r in handler.requests if "/Archives/" in str(r.url)]
+    assert len(archive_urls) == 1
+    assert f"/edgar/data/320193/{ref.accession_number.replace('-', '')}/" in archive_urls[0]
