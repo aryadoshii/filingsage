@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     env: str = "dev"
-    database_url: str = "postgresql://filingsage:filingsage@postgres:5432/filingsage"
+    database_url: str = "postgresql+psycopg://filingsage:filingsage@postgres:5432/filingsage"
     redis_url: str = "redis://redis:6379/0"
 
     # SEC EDGAR fair-access policy requires a declared User-Agent with a

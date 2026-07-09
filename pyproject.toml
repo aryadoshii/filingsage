@@ -8,13 +8,17 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "celery[redis]>=5.4",
     "pydantic-settings>=2.4",
+    "httpx>=0.27",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "httpx>=0.27",
     "ruff>=0.6",
+    "testcontainers[postgres]>=4.8",
 ]
 
 [build-system]
@@ -30,3 +34,4 @@ src = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["integration: requires a running Docker daemon (testcontainers)"]
