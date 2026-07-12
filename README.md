@@ -42,6 +42,14 @@ Non-obvious choices, with reasoning. Each entry names the alternative we rejecte
 10. **No Postgres client library until the schema lands** — the API doesn't touch the database yet; dependencies enter the tree at the point of first use, and the dev stack's DB health is checked at the container level (`pg_isready`).
 11. **Celery `task_acks_late` + `worker_prefetch_multiplier=1`** — at-least-once delivery for long-running ingestion tasks: a worker crash requeues the filing instead of losing it. Safe because pipeline tasks are idempotent (keyed by accession number; bronze writes are immutable).
 12. **8-K sections use full item passthrough with curated canonical names** — unmapped items get generic keys with the document's own heading as the title. Quarantine strictly means parse failure, never scope exclusion, so the quarantine-rate metric stays honest. 10-K/10-Q keep a curated item set by design (their catalogs contain true boilerplate).
+13. **Sync httpx client for ingestion, async for the API** — connectors run inside Celery prefork workers where async adds complexity without concurrency benefit at watchlist scale; httpx keeps one HTTP library across both worlds.
+14. **Hand-rolled rate limiter and backoff over tenacity** — ~25 lines total, fully explainable, with SEC-specific behavior (403 as throttle signal, Retry-After honored, jitter). A retry library would be our first dependency we couldn't defend line-by-line.
+15. **Discovery scope = EDGAR's `recent` submissions window (~1,000 filings/company)** — years of history, right-sized for a monitoring product; full-history backfill is a non-goal for v1.
+16. **String status column + code validation over Postgres ENUM** — PG enum changes are DDL migrations; the pipeline's status vocabulary will grow, and a String(32) with a Python enum keeps that free.
+17. **`events` as a lightweight transactional outbox** — `emit_event` joins the caller's transaction instead of committing, so state changes and their audit events are atomic. Events can never lie about what the database contains.
+18. **psycopg3 as the single Postgres driver** — one driver serving sync (Celery workers) and async (FastAPI) from the same codebase; binary wheels for zero-compile installs on arm64.
+19. **Dev Postgres runs only in Docker; native Postgres stopped** — a host-level Postgres on 5432 silently intercepts `localhost` connections ahead of Docker's port proxy. One database per port, and ours is the container.
+20. **Atomic writes everywhere data lands (tmp + rename)** — bronze documents and silver Parquet both; a crash mid-write can never leave truncated output that a later run mistakes for valid data.
 
 ## Honesty
 

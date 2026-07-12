@@ -28,6 +28,8 @@ FilingSage is an AI research analyst that watches a user's companies, ingests ev
 8. **Git discipline:** conventional commits, suggest commit points as work lands, feature branches for larger pieces. History should show real iterative development.
 9. **When Arya is stuck or demotivated:** find the smallest next shippable step. Never expand scope. Momentum beats perfection.
 10. **Free tiers drift.** Before depending on an external free service, verify its current terms; propose the closest free alternative if they've changed.
+11. **Git authorship:** commits must be authored solely by Arya. Never add
+Co-Authored-By trailers, AI attribution lines, or any name other than Arya's to commits, PRs, or repository metadata — no exceptions.
 
 ## Calibrating explanations
 
