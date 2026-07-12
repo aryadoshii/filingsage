@@ -30,6 +30,13 @@ services:
   api:
     build: .
     env_file: .env
+    # .env's DATABASE_URL/REDIS_URL are host-facing (localhost:5432/6379, for
+    # `python -m filingsage.cli` run on the Mac). Inside a container,
+    # `localhost` is the container itself — these overrides point at the
+    # in-network service names instead. `environment:` wins over `env_file`.
+    environment:
+      DATABASE_URL: postgresql+psycopg://filingsage:filingsage@postgres:5432/filingsage
+      REDIS_URL: redis://redis:6379/0
     command: ["uvicorn", "filingsage.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     ports:
       - "8000:8000"
@@ -50,9 +57,14 @@ services:
   worker:
     build: .
     env_file: .env
+    # Same container-vs-host URL fix as api (see comment there).
+    environment:
+      DATABASE_URL: postgresql+psycopg://filingsage:filingsage@postgres:5432/filingsage
+      REDIS_URL: redis://redis:6379/0
     command: ["celery", "-A", "filingsage.worker.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
     volumes:
       - ./src:/app/src
+      - ./data:/app/data      # bronze/silver land here — host-visible, matches CLI's local run
     depends_on:
       postgres:
         condition: service_healthy

@@ -8,6 +8,7 @@ from datetime import date
 from filingsage.config import get_settings
 from filingsage.connectors import EdgarClient, EdgarConnector, FilingRef
 from filingsage.parsing.silver import ParseQuarantineError, parse_to_silver
+from filingsage.worker.tasks import ingest_watchlist
 
 
 def _build_connector() -> EdgarConnector:
@@ -68,6 +69,14 @@ def cmd_parse(args: argparse.Namespace) -> None:
             )
 
 
+def cmd_ingest(args: argparse.Namespace) -> None:
+    result = ingest_watchlist.delay(args.tickers, args.limit)
+    tickers = ", ".join(t.upper() for t in args.tickers)
+    print(f"Enqueued ingest_watchlist task {result.id} for {tickers}")
+    print("The worker consumes it asynchronously — follow progress with:")
+    print("  docker compose logs -f worker")
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -m filingsage.cli",
@@ -96,6 +105,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     p_parse.add_argument("--limit", type=int, default=3,
                          help="Most recent filings to parse per ticker (default 3)")
     p_parse.set_defaults(func=cmd_parse)
+
+    p_ingest = sub.add_parser(
+        "ingest", help="Enqueue discover->fetch->parse for a watchlist (worker-side pipeline)"
+    )
+    p_ingest.add_argument("tickers", nargs="+", help="Ticker symbols, e.g. AAPL MSFT NVDA")
+    p_ingest.add_argument("--limit", type=int, default=None,
+                          help="Most recent filings to ingest per ticker (default: all discovered)")
+    p_ingest.set_defaults(func=cmd_ingest)
 
     args = parser.parse_args(argv)
     args.func(args)
