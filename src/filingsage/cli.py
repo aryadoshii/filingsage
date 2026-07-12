@@ -7,6 +7,7 @@ from datetime import date
 
 from filingsage.config import get_settings
 from filingsage.connectors import EdgarClient, EdgarConnector, FilingRef
+from filingsage.parsing.silver import ParseQuarantineError, parse_to_silver
 
 
 def _build_connector() -> EdgarConnector:
@@ -47,6 +48,26 @@ def cmd_fetch(args: argparse.Namespace) -> None:
             print(f"  {ref.filed_at}  {ref.form_type:<5} -> {path} ({size_kb:.0f} KB)")
 
 
+def cmd_parse(args: argparse.Namespace) -> None:
+    settings = get_settings()
+    connector = _build_connector()
+    filings = connector.discover(args.tickers, since=args.since)
+    for ticker, rows in _group(filings).items():
+        print(f"\n{ticker}: parsing {min(args.limit, len(rows))} of {len(rows)} filings")
+        for ref in rows[: args.limit]:
+            bronze_path = connector.fetch_raw(ref)
+            try:
+                result = parse_to_silver(bronze_path, ref, settings.data_dir / "silver")
+            except ParseQuarantineError as exc:
+                print(f"  {ref.filed_at}  {ref.form_type:<5} QUARANTINED — {exc}")
+                continue
+            note = f" ({result.duplicate_count} dup dropped)" if result.duplicate_count else ""
+            print(
+                f"  {ref.filed_at}  {ref.form_type:<5} -> {result.silver_path.name} "
+                f"({result.section_count} sections{note})"
+            )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -m filingsage.cli",
@@ -67,6 +88,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     p_fetch.add_argument("--limit", type=int, default=3,
                          help="Most recent filings to fetch per ticker (default 3)")
     p_fetch.set_defaults(func=cmd_fetch)
+
+    p_parse = sub.add_parser("parse", help="Discover, fetch, and parse into sectioned silver Parquet")
+    p_parse.add_argument("tickers", nargs="+", help="Ticker symbols, e.g. AAPL MSFT NVDA")
+    p_parse.add_argument("--since", type=date.fromisoformat, default=None,
+                         help="Only filings on/after this date (YYYY-MM-DD)")
+    p_parse.add_argument("--limit", type=int, default=3,
+                         help="Most recent filings to parse per ticker (default 3)")
+    p_parse.set_defaults(func=cmd_parse)
 
     args = parser.parse_args(argv)
     args.func(args)

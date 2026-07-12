@@ -41,6 +41,7 @@ Non-obvious choices, with reasoning. Each entry names the alternative we rejecte
 9. **One container image for API and Celery worker** — same code and dependencies, different command. A second image adds build/maintenance cost with no isolation benefit at this scale; the model sidecar *will* be a separate image because its torch stack is heavy and orthogonal.
 10. **No Postgres client library until the schema lands** — the API doesn't touch the database yet; dependencies enter the tree at the point of first use, and the dev stack's DB health is checked at the container level (`pg_isready`).
 11. **Celery `task_acks_late` + `worker_prefetch_multiplier=1`** — at-least-once delivery for long-running ingestion tasks: a worker crash requeues the filing instead of losing it. Safe because pipeline tasks are idempotent (keyed by accession number; bronze writes are immutable).
+12. **8-K sections use full item passthrough with curated canonical names** — unmapped items get generic keys with the document's own heading as the title. Quarantine strictly means parse failure, never scope exclusion, so the quarantine-rate metric stays honest. 10-K/10-Q keep a curated item set by design (their catalogs contain true boilerplate).
 
 ## Honesty
 
