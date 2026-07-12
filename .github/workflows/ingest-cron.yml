@@ -1,0 +1,27 @@
+# Triggers the ingestion pipeline every 2h by hitting the deployed API's
+# internal endpoint — no checkout, no Python, no repo code runs here. The
+# cron's only credential is one revocable token (INGEST_TOKEN), and the
+# Celery/Redis queue stays an internal detail the workflow never touches.
+# Safe to re-run any time: ingest_watchlist's ON CONFLICT dedupe gate makes
+# a repeat run against already-seen filings a no-op.
+#
+# Requires repo secrets:
+#   INGEST_URL   — base URL of the deployed API (e.g. https://filingsage.example.com)
+#   INGEST_TOKEN — must match the deployed INGEST_TOKEN (.env.prod)
+name: ingest-cron
+
+on:
+  schedule:
+    # :17 past every even hour, not :00 — GitHub delays jobs scheduled at
+    # :00 under platform load, since that's when everyone else's cron fires.
+    - cron: "17 */2 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  trigger-ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /internal/ingest
+        run: |
+          curl -sf -X POST "${{ secrets.INGEST_URL }}/internal/ingest" \
+            -H "X-Ingest-Token: ${{ secrets.INGEST_TOKEN }}"

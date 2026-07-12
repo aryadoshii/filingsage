@@ -5,8 +5,9 @@ __pycache__/
 .venv/
 venv/
 
-# Env & secrets — .env never enters git
+# Env & secrets — .env* never enters git (the .example files are the exception)
 .env
+.env.prod
 
 # Local data lake (bronze/silver land in R2 in prod; local dev only)
 data/

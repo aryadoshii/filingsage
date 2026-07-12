@@ -1,0 +1,40 @@
+name: filingsage
+
+# Runs on the Oracle VM. No postgres/redis containers — prod uses Neon
+# (Postgres) and Upstash (Redis), reached via DATABASE_URL/REDIS_URL in
+# .env.prod. No bind mounts, no --reload: the image is the deployable unit,
+# rebuilt and redeployed on every release, not live-edited in place.
+
+services:
+  api:
+    build: .
+    env_file: .env.prod
+    restart: unless-stopped
+    command: ["uvicorn", "filingsage.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # Loopback only — Cloudflare Tunnel is the sole public entry point. This
+    # port must never be reachable on the VM's public interface.
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build: .
+    env_file: .env.prod
+    restart: unless-stopped
+    command: ["celery", "-A", "filingsage.worker.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    volumes:
+      - data:/app/data  # bronze/silver on VM disk until the R2 increment
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A filingsage.worker.celery_app:celery_app inspect ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  data:
