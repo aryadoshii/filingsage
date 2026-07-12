@@ -21,6 +21,19 @@ class Settings(BaseSettings):
     # real contact. Used by the EDGAR connector; must be set before ingestion.
     sec_contact_email: str = "change-me@example.com"
 
+    # Shared secret for POST /internal/ingest (called by the GitHub Actions
+    # cron every 2h, increment 5). Empty by default so an unconfigured
+    # deployment fails closed (503), never open (spec: never let an empty
+    # secret mean "no auth required").
+    ingest_token: str = ""
+
+    # Spec's 10-ticker default watchlist — used when /internal/ingest is
+    # called without an explicit tickers list (the cron's normal case).
+    default_universe: list[str] = [
+        "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
+        "META", "TSLA", "JPM", "V", "UNH",
+    ]
+
     # Local data lake root (gitignored). Prod uses R2 — same layout, different root.
     data_dir: Path = Path("data")
 

@@ -15,9 +15,17 @@ COPY pyproject.toml ./
 COPY src/ ./src/
 # Editable install + the bind mount in compose = live-reload dev loop.
 # Image rebuilds are only needed when dependencies change, so we skip
-# layer-split caching gymnastics for now; the prod image gets its own
-# hardening pass (non-root user, pinned lockfile) in Week 1.
+# layer-split caching gymnastics for now; a pinned lockfile is a later pass.
 RUN pip install --no-cache-dir -e .
+
+# Non-root: root-in-container is one less privilege an escaped process would
+# have, and it's what silences Celery's "running as superuser" warning.
+# /app/data is created (and owned by `app`) here, before USER switches —
+# the worker writes bronze/silver Parquet there and needs it writable.
+RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin app \
+    && mkdir -p /app/data \
+    && chown -R app:app /app
+USER app
 
 EXPOSE 8000
 CMD ["uvicorn", "filingsage.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
