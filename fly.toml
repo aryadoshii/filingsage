@@ -1,0 +1,46 @@
+# Fly.io app config for the FastAPI service. One app = one process on Fly,
+# so the Celery worker is a SEPARATE app (deploy/worker/fly.toml) built from
+# this same Dockerfile. Manual one-time setup (app create, secrets, first
+# deploy): see deploy/README-fly.md.
+#
+# Deploy (from repo root): fly deploy --config fly.toml
+app = "filingsage-api"
+
+# Nearest Fly region to Mumbai. NOT verified live against `fly platform
+# regions` — flyctl isn't available in this environment. Confirm before the
+# first deploy; if "bom" isn't listed for your account, "sin" (Singapore) is
+# the next-nearest fallback.
+primary_region = "bom"
+
+[build]
+  # Dockerfile is at the repo root, same directory as this file — no
+  # `dockerfile =` override needed (that's only required for the worker
+  # app, whose fly.toml lives in a subdirectory).
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+
+  # Always-on, not spin-down-on-idle. This is the entire reason we picked
+  # Fly over other free-tier PaaS options that sleep idle apps: the cron
+  # trigger and any live visitor must reach a warm process, not pay a cold
+  # start. All three flags below are deliberate, not defaults.
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+
+# Fly's free-tier default size. Flagging, not changing without asking first:
+# FastAPI + SQLAlchemy + httpx should fit comfortably, but this process also
+# imports pyarrow/duckdb transitively (parsing deps shared across the
+# codebase) which push memory headroom lower than a bare FastAPI app would
+# have. Revisit if we see OOM kills in `fly logs` or `fly status`.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

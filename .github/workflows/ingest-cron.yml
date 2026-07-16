@@ -6,8 +6,11 @@
 # a repeat run against already-seen filings a no-op.
 #
 # Requires repo secrets:
-#   INGEST_URL   — base URL of the deployed API (e.g. https://filingsage.example.com)
-#   INGEST_TOKEN — must match the deployed INGEST_TOKEN (.env.prod)
+#   INGEST_URL   — base URL of the deployed API. On Fly.io this is the
+#                  app's own domain (e.g. https://filingsage-api.fly.dev),
+#                  set once the app exists — see deploy/README-fly.md.
+#   INGEST_TOKEN — must match the INGEST_TOKEN secret set on the
+#                  filingsage-api Fly app (fly secrets set, same README)
 name: ingest-cron
 
 on:

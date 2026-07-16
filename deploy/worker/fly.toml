@@ -1,0 +1,48 @@
+# Fly.io app config for the Celery worker. Same Dockerfile as the API app
+# (../../fly.toml), different Fly app and a command override — Fly's model
+# is one app = one process, so "API + worker from one image" means two
+# separate `fly apps create` + two fly.toml files, not one app with two
+# processes. Manual one-time setup: see ../README-fly.md.
+#
+# Deploy (from repo root): fly deploy --config deploy/worker/fly.toml
+app = "filingsage-worker"
+
+# Same region as the api app — keep both close to each other and to
+# Neon/Upstash. See ../../fly.toml's comment on why this isn't verified live.
+primary_region = "bom"
+
+# A worker app has no [http_service], so Fly's proxy-driven auto-stop/start
+# (the mechanism that reacts to HTTP traffic) doesn't apply to it in the
+# first place — but a sleeping worker never drains the queue, so these are
+# set explicitly rather than left to whatever Fly's default for a
+# service-less app happens to be.
+auto_stop_machines = false
+auto_start_machines = false
+min_machines_running = 1
+
+[build]
+  # Path is relative to THIS file's directory (deploy/worker/), resolving to
+  # the shared repo-root Dockerfile. flyctl uses that Dockerfile's directory
+  # (the repo root) as the build context — required, since the Dockerfile
+  # COPYs pyproject.toml and src/ from there.
+  dockerfile = "../../Dockerfile"
+
+# Overrides the image's default CMD (uvicorn) to run the Celery worker
+# instead. concurrency=1, not the dev stack's 2 — sized for this app's
+# 256mb ceiling (see [[vm]] below).
+[processes]
+  app = "celery -A filingsage.worker.celery_app:celery_app worker --loglevel=INFO --concurrency=1"
+
+# Bronze/silver land on local disk until the R2 increment (same as
+# docker-compose.prod.yml's named volume) — a Fly Volume, not the
+# ephemeral machine disk, so a redeploy or machine replacement doesn't lose
+# already-fetched filings. Requires a one-time `fly volumes create`; see
+# ../README-fly.md.
+[[mounts]]
+  source = "data"
+  destination = "/app/data"
+
+# Same free-tier default as the api app — see its comment on headroom.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
