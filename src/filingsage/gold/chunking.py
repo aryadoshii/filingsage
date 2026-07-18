@@ -1,4 +1,4 @@
-"""Section-aware chunking: silver Parquet rows -> ~512-token chunks with overlap.
+"""Section-aware chunking: silver Parquet rows -> ~384-token chunks with overlap.
 
 Gold layer, spec §5/§6: this is the first of two increments — chunking here,
 embeddings + Qdrant upsert in the next one. Deliberately not wired into the
@@ -41,17 +41,18 @@ from filingsage.parsing.sections import Section
 # what makes count_tokens() meaningful rather than an arbitrary estimate.
 TOKENIZER_MODEL = "BAAI/bge-small-en-v1.5"
 
-# BGE-small-en-v1.5's real context window is 512 tokens INCLUDING the
-# [CLS]/[SEP] special tokens FastEmbed adds at actual embed time. We budget
-# 510 content tokens here (2 reserved for those specials) so a chunk plus
-# its special tokens never exceeds the model's true limit — "~512" per the
-# task, with the 2-token reservation spelled out rather than silently
-# eating into headroom no one asked to give up.
-MAX_CHUNK_TOKENS = 510
+# 512 is BGE-small-en-v1.5's hard context CEILING, not a target — chunking
+# right up to it leaves no room for the [CLS]/[SEP] special tokens FastEmbed
+# adds at actual embed time (a chunk at exactly 512 content tokens would
+# silently overflow and truncate). 384 reserves that headroom, and goes
+# further: smaller chunks embed more precisely, since a tighter span of
+# text produces a vector representing more focused meaning — sharper
+# retrieval, not just a safety margin.
+MAX_CHUNK_TOKENS = 384
 
-# ~12.5% of MAX_CHUNK_TOKENS. Enough shared context that a fact split across
-# a chunk boundary still appears whole in at least one chunk, without
-# ballooning the number of chunks (and embedding calls) per filing.
+# Enough shared context that a fact split across a chunk boundary still
+# appears whole in at least one chunk, without ballooning the number of
+# chunks (and embedding calls) per filing.
 CHUNK_OVERLAP_TOKENS = 64
 
 

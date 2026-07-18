@@ -48,7 +48,7 @@ _LONG_SENTENCE = (
 
 def _long_section(key: str = "risk_factors", item_no: str = "1A") -> Section:
     # ~35-40 tokens per repeat; 80 repeats comfortably clears MAX_CHUNK_TOKENS
-    # (510) several times over, forcing multiple overlapping windows.
+    # (384) several times over, forcing multiple overlapping windows.
     return Section(key=key, item_no=item_no, heading="Risk Factors", text=_LONG_SENTENCE * 80)
 
 
