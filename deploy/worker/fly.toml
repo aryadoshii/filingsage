@@ -7,8 +7,11 @@
 # Deploy (from repo root): fly deploy --config deploy/worker/fly.toml
 app = "filingsage-worker"
 
-# Same region as the api app — keep both close to each other and to
-# Neon/Upstash. See ../../fly.toml's comment on why this isn't verified live.
+# NOT the same region as the api app (bom/Mumbai) — bom's Always Free
+# capacity turned out to be constrained specifically for volume-attached
+# machines (this app mounts a Fly Volume for /app/data, below), even though
+# the api app deploys there fine without one. sin (Singapore) is the
+# fallback that had capacity. See README.md → Technical Decisions #21.
 primary_region = "sin"
 
 # A worker app has no [http_service], so Fly's proxy-driven auto-stop/start

@@ -65,7 +65,11 @@ ruff check src tests                     # lint
 - [ ] Day 1 — repo scaffold + Compose skeleton (api/worker/postgres/redis, healthchecks green, ping round-trip verified)
 - [ ] Day 1 — `SourceConnector` ABC + `EdgarConnector.discover()` for 3 tickers → local bronze
 - [ ] Day 1–3 — Oracle Cloud signup started (parallel; don't block on it)
-- [ ] Week 1 — parse/section → silver Parquet + DQ checks; Postgres schema + `events`; Actions cron (10-ticker universe); Terraform; **live URL with HTTPS**
+- [x] Week 1 — parse/section → silver Parquet + DQ checks
+- [x] Week 1 — Postgres schema + `events`
+- [ ] Week 1 — Actions cron (10-ticker universe) — workflow committed (`.github/workflows/ingest-cron.yml`), not yet confirmed firing on GitHub's own schedule (only manually/curl-triggered so far)
+- ~~Terraform~~ — superseded by Fly.io (README → Technical Decisions #21); Oracle path abandoned, no Terraform was ever written
+- [x] Week 1 — **live URL with HTTPS** — https://filingsage-api.fly.dev; full discover→fetch→parse pipeline verified end-to-end in production (TSLA 8-K reached `status=parsed` with matching discovered/fetched/parsed events in Neon)
 - [ ] Week 2 — chunking/embeddings/Qdrant hybrid + reranker; cited Q&A v0; minimal frontend; semantic cache
 - [ ] Week 3 — LangGraph graph; provider routing; email briefs; real JWT auth + quotas
 - [ ] Week 4 — observability full pass; golden dataset + eval CI gate; load-test baseline

@@ -10,10 +10,16 @@ Fly's model is one app = one process from one image, so the API and the
 Celery worker are **two separate Fly apps** built from the same repo-root
 `Dockerfile`:
 
-| App | Config | Role |
-|---|---|---|
-| `filingsage-api` | `fly.toml` (repo root) | uvicorn, public via Fly's proxy |
-| `filingsage-worker` | `deploy/worker/fly.toml` | Celery worker, no public ingress |
+| App | Config | Role | Region |
+|---|---|---|---|
+| `filingsage-api` | `fly.toml` (repo root) | uvicorn, public via Fly's proxy | `bom` (Mumbai) |
+| `filingsage-worker` | `deploy/worker/fly.toml` | Celery worker, no public ingress | `sin` (Singapore) |
+
+The two apps are in **different** regions, not a typo: `bom`'s Always Free
+capacity was available for the api app but proved constrained specifically
+for volume-attached machines, which the worker is (it mounts a Fly Volume
+for `/app/data` — step 2 below). `sin` had capacity. See README.md →
+Technical Decisions #21.
 
 This file is a checklist for Arya to run by hand — nothing here runs itself,
 and app creation should happen once, deliberately. Requires the Neon and
@@ -26,10 +32,12 @@ Upstash URLs to exist first.
 - [ ] Upstash Redis connection string on hand (`rediss://...`, TLS scheme)
 - [ ] A freshly generated `INGEST_TOKEN` for prod (do **not** reuse the dev
       `.env`'s token): `python -c "import secrets; print(secrets.token_urlsafe(32))"`
-- [ ] Confirm the region: `fly platform regions` — this repo's fly.toml
-      files assume `bom` (Mumbai) exists on your account/plan; if not, change
-      `primary_region` in both fly.toml files to `sin` (Singapore) before
-      continuing.
+- [ ] Confirm both regions: `fly platform regions` — `fly.toml` (api) assumes
+      `bom`, `deploy/worker/fly.toml` assumes `sin` (bom's Always Free
+      capacity proved constrained for volume-attached machines specifically —
+      see the table above). If capacity has shifted since, adjust
+      `primary_region` in the relevant file before continuing; the two apps
+      don't need to match each other.
 
 ## 1. Create both apps
 
@@ -44,11 +52,14 @@ Bronze/silver land on disk until the R2 increment — a Fly Volume survives
 redeploys and machine replacement; the machine's own local disk does not.
 
 ```bash
-fly volumes create data --app filingsage-worker --region bom --size 1
+fly volumes create data --app filingsage-worker --region sin --size 1
 ```
 
-(`--size` is in GB; 1 is the minimum and enough for the current filing
-volumes. Resize later with `fly volumes extend` if needed.)
+(`--region` must match the worker app's `primary_region` in
+`deploy/worker/fly.toml` — a volume is pinned to the region it's created in,
+and a machine can only mount a volume in its own region. `--size` is in GB;
+1 is the minimum and enough for the current filing volumes — resize later
+with `fly volumes extend` if needed.)
 
 ## 3. Set secrets on each app
 
@@ -68,10 +79,30 @@ done
 ```
 
 (`fly secrets set` triggers a release/restart on its own — no separate
-deploy needed just for secrets, but the first deploy in step 4 still has to
+deploy needed just for secrets, but the first deploy in step 5 still has to
 happen at least once to actually get an image running.)
 
-## 4. First deploy of each app
+## 4. Run database migrations against Neon
+
+**Not yet automated — a real gap, hit once already.** A fresh Neon project
+has no schema; nothing in this checklist or in either fly.toml runs `alembic
+upgrade head` for you. Skipping this step means the api/worker apps deploy
+and pass health checks fine, then fail with a Postgres `UndefinedTable`
+error the moment anything actually touches the `companies`/`filings`/
+`events` tables (exactly what happened on the first real production ingest).
+Run it by hand, from the repo root, against the real Neon URL:
+
+```bash
+DATABASE_URL="postgresql+psycopg://user:password@...neon.tech/filingsage?sslmode=require" \
+  alembic upgrade head
+```
+
+Re-run after every migration-adding change, before redeploying. Candidates
+for automating this later: a Fly `release_command` (runs once per deploy,
+before the new version takes traffic) or a one-off GitHub Actions job
+triggered on migration file changes. See README.md → Technical Decisions #22.
+
+## 5. First deploy of each app
 
 ```bash
 fly deploy --config fly.toml                     # filingsage-api (repo root)
@@ -85,7 +116,7 @@ fly config validate --config fly.toml
 fly config validate --config deploy/worker/fly.toml
 ```
 
-## 5. Verify
+## 6. Verify
 
 ```bash
 fly status --app filingsage-api
@@ -94,7 +125,7 @@ curl -sf https://filingsage-api.fly.dev/healthz
 fly logs --app filingsage-worker   # confirm Celery connected to Redis/Postgres
 ```
 
-## 6. Point the ingest cron at it
+## 7. Point the ingest cron at it
 
 `.github/workflows/ingest-cron.yml` reads `secrets.INGEST_URL` and
 `secrets.INGEST_TOKEN` from the GitHub repo's Actions secrets — set those in
