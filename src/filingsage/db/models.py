@@ -1,4 +1,4 @@
-"""Core schema, spec §4: companies, filings, events (auth tables land Week 3).
+"""Core schema, spec §4: companies, filings, events, chunks (auth tables land Week 3).
 
 Schema-as-code: this metadata is the single source of truth; Alembic
 autogenerates migrations by diffing against it.
@@ -18,6 +18,7 @@ from sqlalchemy import (
     ForeignKey,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -81,6 +82,34 @@ class Filing(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class Chunk(Base):
+    """Gold-layer retrieval unit: one ~512-token slice of a filing section.
+
+    `qdrant_point_id` stays null until increment 2 (embeddings) — this table
+    lands one increment ahead of the embedder so chunking can be built and
+    tested in isolation, with persistence idempotent the same way the rest
+    of the pipeline is (`filing_id, seq` unique — re-chunking a filing is a
+    no-op, not a duplicate row).
+    """
+
+    __tablename__ = "chunks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    filing_id: Mapped[int] = mapped_column(ForeignKey("filings.id"), index=True)
+    section: Mapped[str] = mapped_column(String(32))
+    seq: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    text_hash: Mapped[str] = mapped_column(String(64), index=True)
+    qdrant_point_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    char_count: Mapped[int] = mapped_column(Integer)
+    token_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (UniqueConstraint("filing_id", "seq", name="uq_chunks_filing_id_seq"),)
 
 
 class Event(Base):

@@ -71,6 +71,8 @@ ruff check src tests                     # lint
 - ~~Terraform~~ — superseded by Fly.io (README → Technical Decisions #21); Oracle path abandoned, no Terraform was ever written
 - [x] Week 1 — **live URL with HTTPS** — https://filingsage-api.fly.dev; full discover→fetch→parse pipeline verified end-to-end in production (TSLA 8-K reached `status=parsed` with matching discovered/fetched/parsed events in Neon)
 - [ ] Week 2 — chunking/embeddings/Qdrant hybrid + reranker; cited Q&A v0; minimal frontend; semantic cache
+  - **In progress.** Architectural pivot from spec (README → Technical Decisions #23, #24): embeddings run via FastEmbed (ONNX, ~BGE-small dense + BM25-family sparse) in-worker, not self-hosted PyTorch on the 24GB Oracle VM that never materialized — worker bumped to 512MB on Fly. Rerank + NLI verification deferred to a later increment; ship hybrid retrieval + cited Q&A first, add those as measured improvements per the spec's own naive→hybrid→+rerank→+verification staging.
+  - [ ] Increment 1 — section-aware chunking (`gold/chunking.py`, `chunks` table, no embeddings/Qdrant/network yet)
 - [ ] Week 3 — LangGraph graph; provider routing; email briefs; real JWT auth + quotas
 - [ ] Week 4 — observability full pass; golden dataset + eval CI gate; load-test baseline
 - [ ] Week 5 — frontend polish; public /status; README results table; demo video

@@ -15,6 +15,12 @@ dependencies = [
     "selectolax>=0.3",
     "pyarrow>=17",
     "duckdb>=1.1",
+    # ONNX-based dense+sparse embeddings (BGE-small + BM25-family), not full
+    # PyTorch — fits the 512MB Fly worker (README → Technical Decisions #23).
+    # Needed now for its tokenizer (gold/chunking.py token counting must
+    # match the embedding model's real context window); the embedder itself
+    # lands in increment 2. One lib covers both, so it's one dependency, not two.
+    "fastembed>=0.8",
 ]
 
 [project.optional-dependencies]
