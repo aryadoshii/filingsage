@@ -9,7 +9,7 @@ app = "filingsage-worker"
 
 # Same region as the api app — keep both close to each other and to
 # Neon/Upstash. See ../../fly.toml's comment on why this isn't verified live.
-primary_region = "bom"
+primary_region = "sin"
 
 # A worker app has no [http_service], so Fly's proxy-driven auto-stop/start
 # (the mechanism that reacts to HTTP traffic) doesn't apply to it in the
