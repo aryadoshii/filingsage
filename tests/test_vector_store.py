@@ -7,9 +7,11 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
 from qdrant_client import QdrantClient
 
 from filingsage.db.models import Chunk as ChunkRow
+from filingsage.gold.embedding import EMBED_BATCH_SIZE
 from filingsage.gold.vector_store import (
     COLLECTION_NAME,
     DENSE_VECTOR_NAME,
@@ -18,6 +20,28 @@ from filingsage.gold.vector_store import (
     point_id_for,
     upsert_chunks,
 )
+
+
+class _FlakyClient:
+    """Proxies a real QdrantClient; raises on the Nth call to .upsert(),
+    succeeds on every other call. Everything else (collection_exists,
+    create_collection, count, retrieve, ...) passes straight through, so
+    the caller sees a real in-memory Qdrant except for the one failure.
+    """
+
+    def __init__(self, inner: QdrantClient, fail_at_call: int):
+        self._inner = inner
+        self._fail_at_call = fail_at_call
+        self.upsert_calls = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def upsert(self, *args, **kwargs):
+        self.upsert_calls += 1
+        if self.upsert_calls == self._fail_at_call:
+            raise RuntimeError("simulated Qdrant upsert failure")
+        return self._inner.upsert(*args, **kwargs)
 
 
 def _chunk_row(id_: int, seq: int, section: str = "risk_factors", text: str | None = None) -> ChunkRow:
@@ -113,3 +137,42 @@ def test_upsert_chunks_with_empty_list_is_a_noop():
     client = QdrantClient(":memory:")
     assert upsert_chunks([], accession_number="acc", cik=1, ticker="X",
                           form_type="8-K", filed_at=date(2026, 1, 1), client=client) == {}
+
+
+def test_upsert_chunks_processes_more_than_one_batch():
+    client = QdrantClient(":memory:")
+    n = EMBED_BATCH_SIZE + 4  # forces >=2 batches at the default batch size
+    rows = [_chunk_row(1000 + i, seq=i) for i in range(n)]
+
+    point_ids = upsert_chunks(
+        rows, accession_number="acc-multi-batch", cik=1, ticker="X",
+        form_type="10-K", filed_at=date(2026, 1, 1), client=client,
+    )
+
+    assert len(point_ids) == n
+    assert set(point_ids.keys()) == {row.id for row in rows}
+    count = client.count(COLLECTION_NAME, exact=True).count
+    assert count == n  # every chunk landed, across every batch
+
+
+def test_failure_on_a_later_batch_leaves_earlier_batches_upserted_but_raises():
+    real_client = QdrantClient(":memory:")
+    n = EMBED_BATCH_SIZE + 4  # 2 batches at the default batch size
+    rows = [_chunk_row(2000 + i, seq=i) for i in range(n)]
+
+    # Fail on the 2nd .upsert() call — the 1st batch (EMBED_BATCH_SIZE
+    # chunks) succeeds before the 2nd batch fails.
+    flaky = _FlakyClient(real_client, fail_at_call=2)
+
+    with pytest.raises(RuntimeError, match="simulated Qdrant upsert failure"):
+        upsert_chunks(
+            rows, accession_number="acc-partial-failure", cik=1, ticker="X",
+            form_type="10-K", filed_at=date(2026, 1, 1), client=flaky,
+        )
+
+    assert flaky.upsert_calls == 2
+    # Qdrant isn't transactional: the first batch's points are durably
+    # there despite the overall call raising. Harmless — point ids are
+    # stable, so a retry re-upserts them identically rather than duplicating.
+    count = real_client.count(COLLECTION_NAME, exact=True).count
+    assert count == EMBED_BATCH_SIZE

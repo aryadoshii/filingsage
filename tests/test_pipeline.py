@@ -49,6 +49,39 @@ HAPPY_8K = (
 
 QUARANTINE_8K = b"<html><body><p>No SEC Item headings anywhere in here.</p></body></html>"
 
+# 12 distinct Item sections, each short enough to be its own single chunk —
+# 12 chunks total, more than EMBED_BATCH_SIZE (8), so a filing built from
+# this actually exercises the multi-batch embed/upsert path.
+MANY_CHUNKS_8K = b"<html><body>" + b"".join(
+    (
+        f"<div>Item {n}.01. Custom Disclosure {n}.</div>"
+        f"<p>This is unique disclosure content number {n} for testing multi-batch "
+        f"embedding, filed as part of a routine update to shareholders.</p>"
+    ).encode()
+    for n in range(1, 13)
+) + b"</body></html>"
+
+
+class _FlakyClient:
+    """Proxies a real QdrantClient; raises on the Nth call to .upsert(),
+    succeeds on every other call — see tests/test_vector_store.py for the
+    unit-level version of this same fake.
+    """
+
+    def __init__(self, inner, fail_at_call: int):
+        self._inner = inner
+        self._fail_at_call = fail_at_call
+        self.upsert_calls = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def upsert(self, *args, **kwargs):
+        self.upsert_calls += 1
+        if self.upsert_calls == self._fail_at_call:
+            raise RuntimeError("simulated Qdrant upsert failure")
+        return self._inner.upsert(*args, **kwargs)
+
 
 def _submissions(accessions, forms, filed_dates, docs):
     return {
@@ -195,6 +228,66 @@ def test_full_chain_reaches_embedded_with_events(wire_connector):
         # points actually landed in the (in-memory) vector store, not just DB rows
         count = vector_store.get_client().count(vector_store.COLLECTION_NAME, exact=True).count
         assert count == len(chunk_rows)
+
+
+def test_full_chain_batches_embeddings_for_a_filing_with_many_chunks(wire_connector):
+    accession_no = "0000900001-26-000010"
+    submissions = _submissions([accession_no], ["8-K"], ["2026-06-10"], ["a.htm"])
+    wire_connector(submissions, {accession_no: MANY_CHUNKS_8K})
+
+    tasks.ingest_watchlist(["ACME"], limit=None)
+
+    with db_session.session_scope() as session:
+        filing = session.scalar(select(Filing).where(Filing.accession_no == accession_no))
+        assert filing.status == FilingStatus.EMBEDDED.value
+
+        chunk_rows = session.scalars(
+            select(ChunkRow).where(ChunkRow.filing_id == filing.id)
+        ).all()
+        # 12 sections built into MANY_CHUNKS_8K, more than EMBED_BATCH_SIZE —
+        # every one of them must have embedded/upserted, not just the first batch.
+        assert len(chunk_rows) == 12
+        assert all(row.qdrant_point_id is not None for row in chunk_rows)
+
+        count = vector_store.get_client().count(vector_store.COLLECTION_NAME, exact=True).count
+        assert count == 12
+
+
+def test_qdrant_failure_on_a_later_batch_leaves_status_not_embedded(wire_connector, monkeypatch):
+    accession_no = "0000900001-26-000011"
+    submissions = _submissions([accession_no], ["8-K"], ["2026-06-11"], ["a.htm"])
+    wire_connector(submissions, {accession_no: MANY_CHUNKS_8K})
+
+    # Fail the 2nd .upsert() call: the 1st batch (EMBED_BATCH_SIZE chunks)
+    # succeeds, forcing an actual partial-batch failure, not just a
+    # first-call failure.
+    real_client = vector_store.get_client()
+    flaky = _FlakyClient(real_client, fail_at_call=2)
+    monkeypatch.setattr(vector_store, "get_client", lambda: flaky)
+
+    with pytest.raises(RuntimeError, match="simulated Qdrant upsert failure"):
+        tasks.ingest_watchlist(["ACME"], limit=None)
+
+    with db_session.session_scope() as session:
+        filing = session.scalar(select(Filing).where(Filing.accession_no == accession_no))
+        # Qdrant-before-status ordering held: the whole chunk_and_embed
+        # transaction rolled back, so status never advanced past PARSED —
+        # safely retryable, nothing left half-done in Postgres.
+        assert filing.status == FilingStatus.PARSED.value
+
+        embedded_event = session.scalar(
+            select(Event).where(
+                Event.entity_id == accession_no, Event.type == "filing.embedded"
+            )
+        )
+        assert embedded_event is None
+
+        # The DB transaction rolled back entirely, so chunk rows from this
+        # failed run are gone too — a retry starts clean, not half-persisted.
+        chunk_rows = session.scalars(
+            select(ChunkRow).where(ChunkRow.filing_id == filing.id)
+        ).all()
+        assert chunk_rows == []
 
 
 def test_ingest_is_idempotent_on_rerun(wire_connector):

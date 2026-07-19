@@ -37,6 +37,16 @@ DENSE_VECTOR_SIZE = 384
 
 SPARSE_MODEL = "Qdrant/bm25"
 
+# Caps peak memory: embedding a batch of texts allocates proportionally to
+# batch size (both models' ONNX runtimes hold every text's intermediate
+# tensors in memory at once within a call). A large 10-K can produce ~40
+# chunks — embedding all of them in one embed_texts() call, on top of two
+# loaded ONNX models plus the pyarrow/duckdb/Celery baseline, OOM-killed the
+# 512MB worker in production. vector_store.upsert_chunks() embeds and
+# upserts in batches of this size instead of the whole filing at once, so
+# peak memory is one batch's worth of tensors, not the filing's.
+EMBED_BATCH_SIZE = 8
+
 
 @lru_cache(maxsize=1)
 def _dense_model() -> TextEmbedding:

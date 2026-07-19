@@ -17,7 +17,7 @@ from qdrant_client import QdrantClient, models
 
 from filingsage.config import get_settings
 from filingsage.db.models import Chunk as ChunkRow
-from filingsage.gold.embedding import DENSE_VECTOR_SIZE, embed_texts
+from filingsage.gold.embedding import DENSE_VECTOR_SIZE, EMBED_BATCH_SIZE, embed_texts
 
 COLLECTION_NAME = "filings"
 DENSE_VECTOR_NAME = "dense"
@@ -80,15 +80,26 @@ def upsert_chunks(
     filed_at: date,
     client: QdrantClient | None = None,
 ) -> dict[int, str]:
-    """Embed each chunk row's text and upsert to Qdrant.
+    """Embed each chunk row's text and upsert to Qdrant, in batches.
 
     The payload is fully denormalized (cik/ticker/form_type/filed_at come
     from the filing, not the chunk row) so filtered retrieval later doesn't
     need a join back to Postgres — everything needed to filter and cite a
     hit lives on the point itself.
 
-    Returns {chunk_row.id: qdrant_point_id}, so the caller can write
-    qdrant_point_id back onto each `chunks` table row.
+    Processed EMBED_BATCH_SIZE chunks at a time — embed batch, upsert batch,
+    continue — so peak memory is one batch's worth of embeddings, not the
+    whole filing's (a large 10-K's ~40 chunks embedded in one call OOM-killed
+    the 512MB worker in production). Qdrant has no transactions: if a later
+    batch fails, earlier batches are already durably upserted (harmlessly —
+    point ids are stable, so a retry of the whole task just re-upserts them
+    identically) and this function raises, which the caller (chunk_and_embed)
+    relies on to keep status from advancing to EMBEDDED on a partial run.
+
+    Returns {chunk_row.id: qdrant_point_id} for every row that was
+    successfully upserted, so the caller can write qdrant_point_id back onto
+    each `chunks` table row. On a mid-batch failure this never returns —
+    the exception propagates before the caller can use a partial result.
     """
     client = client or get_client()
     ensure_collection(client)
@@ -96,35 +107,38 @@ def upsert_chunks(
     if not chunk_rows:
         return {}
 
-    dense_vectors, sparse_vectors = embed_texts([row.text for row in chunk_rows])
-
-    points: list[models.PointStruct] = []
     point_ids: dict[int, str] = {}
-    for row, dense, sparse in zip(chunk_rows, dense_vectors, sparse_vectors, strict=True):
-        point_id = point_id_for(accession_number, row.seq)
-        points.append(
-            models.PointStruct(
-                id=point_id,
-                vector={
-                    DENSE_VECTOR_NAME: dense,
-                    SPARSE_VECTOR_NAME: models.SparseVector(
-                        indices=sparse.indices, values=sparse.values
-                    ),
-                },
-                payload={
-                    "cik": cik,
-                    "ticker": ticker,
-                    "form_type": form_type,
-                    "filed_at": filed_at.isoformat(),
-                    "section": row.section,
-                    "seq": row.seq,
-                    "accession_number": accession_number,
-                    "chunk_id": row.id,
-                    "text": row.text,
-                },
-            )
-        )
-        point_ids[row.id] = point_id
+    for batch_start in range(0, len(chunk_rows), EMBED_BATCH_SIZE):
+        batch = chunk_rows[batch_start : batch_start + EMBED_BATCH_SIZE]
+        dense_vectors, sparse_vectors = embed_texts([row.text for row in batch])
 
-    client.upsert(collection_name=COLLECTION_NAME, points=points)
+        points: list[models.PointStruct] = []
+        for row, dense, sparse in zip(batch, dense_vectors, sparse_vectors, strict=True):
+            point_id = point_id_for(accession_number, row.seq)
+            points.append(
+                models.PointStruct(
+                    id=point_id,
+                    vector={
+                        DENSE_VECTOR_NAME: dense,
+                        SPARSE_VECTOR_NAME: models.SparseVector(
+                            indices=sparse.indices, values=sparse.values
+                        ),
+                    },
+                    payload={
+                        "cik": cik,
+                        "ticker": ticker,
+                        "form_type": form_type,
+                        "filed_at": filed_at.isoformat(),
+                        "section": row.section,
+                        "seq": row.seq,
+                        "accession_number": accession_number,
+                        "chunk_id": row.id,
+                        "text": row.text,
+                    },
+                )
+            )
+            point_ids[row.id] = point_id
+
+        client.upsert(collection_name=COLLECTION_NAME, points=points)
+
     return point_ids
