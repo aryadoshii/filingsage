@@ -74,6 +74,8 @@ for APP in filingsage-api filingsage-worker; do
     REDIS_URL="rediss://default:password@....upstash.io:6379" \
     SEC_CONTACT_EMAIL="you@example.com" \
     INGEST_TOKEN="<the fresh prod token from step 0>" \
+    QDRANT_URL="https://xxxxxxxx.gcp.cloud.qdrant.io:6333" \
+    QDRANT_API_KEY="<from the Qdrant Cloud cluster dashboard>" \
     --app "$APP"
 done
 ```

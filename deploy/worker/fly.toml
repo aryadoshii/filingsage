@@ -32,7 +32,7 @@ min_machines_running = 1
 
 # Overrides the image's default CMD (uvicorn) to run the Celery worker
 # instead. concurrency=1, not the dev stack's 2 — sized for this app's
-# 256mb ceiling (see [[vm]] below).
+# memory ceiling (see [[vm]] below).
 [processes]
   app = "celery -A filingsage.worker.celery_app:celery_app worker --loglevel=INFO --concurrency=1"
 
@@ -45,7 +45,10 @@ min_machines_running = 1
   source = "data"
   destination = "/app/data"
 
-# Same free-tier default as the api app — see its comment on headroom.
+# Bumped from the free-tier default 256mb (README → Technical Decisions
+# #23): this process now loads two ONNX models in-memory (BGE-small dense +
+# BM25 sparse, both baked into the image — see ../../Dockerfile) alongside
+# the Celery/SQLAlchemy/pyarrow stack that already ran fine at 256mb.
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "256mb"
+  memory = "512mb"

@@ -17,10 +17,16 @@ dependencies = [
     "duckdb>=1.1",
     # ONNX-based dense+sparse embeddings (BGE-small + BM25-family), not full
     # PyTorch — fits the 512MB Fly worker (README → Technical Decisions #23).
-    # Needed now for its tokenizer (gold/chunking.py token counting must
-    # match the embedding model's real context window); the embedder itself
-    # lands in increment 2. One lib covers both, so it's one dependency, not two.
+    # Used for both its tokenizer (gold/chunking.py token counting, so chunk
+    # boundaries match the embedding model's real context window) and the
+    # actual dense+sparse embedding calls (gold/embedding.py). One lib
+    # covers both, so it's one dependency, not two.
     "fastembed>=0.8",
+    # Official Qdrant client — typed models for the hybrid (named dense +
+    # sparse vector) collection API used in gold/vector_store.py, and one
+    # client that works identically against local/in-memory Qdrant (tests)
+    # and Qdrant Cloud (prod) with just a different URL.
+    "qdrant-client>=1.13",
 ]
 
 [project.optional-dependencies]

@@ -1,11 +1,16 @@
-"""Integration tests for the discover -> fetch -> parse Celery pipeline.
+"""Integration tests for the discover -> fetch -> parse -> chunk_and_embed
+Celery pipeline.
 
 Real Postgres via testcontainers + real alembic migrations (same pattern as
-test_db.py). EDGAR is faked with httpx.MockTransport (no network); Celery
-runs in eager mode (no broker) so `.delay()` inside a task body executes the
-next task's function synchronously in-process. `_connector()` and
-`get_settings()` are the tasks module's construction seams — monkeypatched
-per test so tasks never touch the real network or the real data/ directory.
+test_db.py). EDGAR is faked with httpx.MockTransport (no network); Qdrant is
+faked with qdrant-client's in-memory mode (never the real Qdrant Cloud
+cluster). Celery runs in eager mode (no broker) so `.delay()` inside a task
+body executes the next task's function synchronously in-process — which
+means every test in this module runs the FULL chain through chunk_and_embed,
+not just the steps it's nominally about. `_connector()`/`get_settings()`
+(tasks module) and `get_client()` (vector_store module) are the construction
+seams — monkeypatched per test so nothing here touches the real network,
+the real data/ directory, or a real Qdrant cluster.
 """
 
 from __future__ import annotations
@@ -16,14 +21,17 @@ import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
+from qdrant_client import QdrantClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from testcontainers.postgres import PostgresContainer
 
 import filingsage.db.session as db_session
+import filingsage.gold.vector_store as vector_store
 import filingsage.worker.tasks as tasks
 from filingsage.connectors.edgar import EdgarClient, EdgarConnector
 from filingsage.db.events import emit_event
+from filingsage.db.models import Chunk as ChunkRow
 from filingsage.db.models import Company, Event, Filing, FilingStatus
 
 pytestmark = pytest.mark.integration
@@ -123,6 +131,20 @@ def _eager_celery():
     tasks.celery_app.conf.task_eager_propagates = False
 
 
+@pytest.fixture(autouse=True)
+def _wire_vector_store(monkeypatch):
+    """Point vector_store.get_client() at in-memory Qdrant, not the real cluster.
+
+    Autouse: eager Celery mode means EVERY test's chain now cascades all the
+    way through chunk_and_embed (there's no way to stop it at an earlier
+    step short of not calling .delay() at all), so even tests that aren't
+    nominally about embeddings would otherwise hit filingsage.config's
+    empty-string QDRANT_URL default.
+    """
+    client = QdrantClient(":memory:")
+    monkeypatch.setattr(vector_store, "get_client", lambda: client)
+
+
 @pytest.fixture
 def wire_connector(tmp_path, monkeypatch):
     """Wire tasks._connector()/get_settings() to a fake EDGAR + tmp data dir."""
@@ -136,29 +158,43 @@ def wire_connector(tmp_path, monkeypatch):
     return _wire
 
 
-def test_full_chain_reaches_parsed_with_events(wire_connector):
-    submissions = _submissions(["0000900001-26-000001"], ["8-K"], ["2026-06-01"], ["a.htm"])
-    wire_connector(submissions, {"0000900001-26-000001": HAPPY_8K})
+def test_full_chain_reaches_embedded_with_events(wire_connector):
+    accession_no = "0000900001-26-000001"
+    submissions = _submissions([accession_no], ["8-K"], ["2026-06-01"], ["a.htm"])
+    wire_connector(submissions, {accession_no: HAPPY_8K})
 
     result = tasks.ingest_watchlist(["ACME"], limit=None)
     assert result == {"discovered": 1, "inserted": 1}
 
     with db_session.session_scope() as session:
-        filing = session.scalar(
-            select(Filing).where(Filing.accession_no == "0000900001-26-000001")
-        )
-        assert filing.status == FilingStatus.PARSED.value
+        filing = session.scalar(select(Filing).where(Filing.accession_no == accession_no))
+        assert filing.status == FilingStatus.EMBEDDED.value
         assert filing.r2_bronze_key is not None
         assert filing.r2_silver_key is not None
 
-        events = session.scalars(
-            select(Event).where(Event.entity_id == "0000900001-26-000001")
-        ).all()
-        assert {e.type for e in events} == {
+        events = {
+            e.type: e
+            for e in session.scalars(
+                select(Event).where(Event.entity_id == accession_no)
+            ).all()
+        }
+        assert set(events) == {
             "filing.discovered",
             "filing.fetched",
             "filing.parsed",
+            "filing.embedded",
         }
+
+        chunk_rows = session.scalars(
+            select(ChunkRow).where(ChunkRow.filing_id == filing.id)
+        ).all()
+        assert len(chunk_rows) > 0
+        assert events["filing.embedded"].payload_json == {"chunk_count": len(chunk_rows)}
+        assert all(row.qdrant_point_id is not None for row in chunk_rows)
+
+        # points actually landed in the (in-memory) vector store, not just DB rows
+        count = vector_store.get_client().count(vector_store.COLLECTION_NAME, exact=True).count
+        assert count == len(chunk_rows)
 
 
 def test_ingest_is_idempotent_on_rerun(wire_connector):

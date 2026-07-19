@@ -9,7 +9,15 @@ from filingsage.db.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: fileConfig's default (True) disables
+    # every logger already registered at this point that alembic.ini
+    # doesn't explicitly name — including application loggers like
+    # filingsage.gold.embedding, permanently, for the rest of the process.
+    # Harmless for a one-shot `alembic upgrade`, but every test file in
+    # this suite runs migrations in-process (testcontainers), so without
+    # this any test importing an app module before the first migration
+    # would go silently mute for the rest of the pytest session.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Settings are the single source of truth for the URL. Tests override it
 # programmatically before invoking alembic; the CLI path falls through here.

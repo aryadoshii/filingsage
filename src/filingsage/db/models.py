@@ -48,6 +48,7 @@ class FilingStatus(str, enum.Enum):
     FETCHED = "fetched"
     PARSED = "parsed"
     QUARANTINED = "quarantined"
+    EMBEDDED = "embedded"
 
 
 class Company(Base):

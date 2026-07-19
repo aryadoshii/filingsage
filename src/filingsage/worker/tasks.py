@@ -1,4 +1,4 @@
-"""Celery tasks: the discover -> fetch -> parse ingestion pipeline (spec §3).
+"""Celery tasks: the discover -> fetch -> parse -> chunk_and_embed pipeline (spec §3).
 
 Each task takes only an accession_no string (task-argument hygiene): task
 payloads stay small and JSON-serializable, and the Filing row — not a stale
@@ -22,8 +22,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from filingsage.config import get_settings
 from filingsage.connectors import EdgarClient, EdgarConnector, FilingRef
 from filingsage.db.events import emit_event
+from filingsage.db.models import Chunk as ChunkRow
 from filingsage.db.models import Company, Filing, FilingStatus
 from filingsage.db.session import session_scope
+from filingsage.gold.chunking import chunk_filing, persist_chunks
+from filingsage.gold.vector_store import upsert_chunks
 from filingsage.parsing.silver import ParseQuarantineError, parse_to_silver
 from filingsage.worker.celery_app import celery_app
 
@@ -176,3 +179,54 @@ def parse_filing(accession_no: str) -> None:
         emit_event(
             session, "filing.parsed", accession_no, {"section_count": result.section_count}
         )
+
+    chunk_and_embed.delay(accession_no)  # only after the parse committed above
+
+
+@celery_app.task(name="filingsage.chunk_and_embed")
+def chunk_and_embed(accession_no: str) -> None:
+    """Chunk a parsed filing's silver Parquet, embed it, upsert to Qdrant.
+
+    Everything — chunk persistence, the Qdrant upsert, writing
+    qdrant_point_id back onto each chunk row, and the status/event change —
+    happens inside ONE session_scope, with the Qdrant upsert ordered BEFORE
+    the final status->EMBEDDED write. Qdrant has no transactions of its
+    own, so if it fails partway, the whole DB transaction (including any
+    chunk rows persisted this run) rolls back with it — status never
+    advances to EMBEDDED without the vectors actually being in Qdrant. A
+    retry is safe either way: persist_chunks is idempotent (ON CONFLICT DO
+    NOTHING) and Qdrant upsert is idempotent (stable point ids), so redoing
+    the whole task from scratch just re-derives the same result.
+    """
+    with session_scope() as session:
+        filing = session.scalar(select(Filing).where(Filing.accession_no == accession_no))
+        if filing is None:
+            logger.warning("chunk_and_embed: unknown accession_no %s", accession_no)
+            return
+        company = session.get(Company, filing.cik)
+
+        gold_chunks = chunk_filing(Path(filing.r2_silver_key))
+        persist_chunks(session, filing.id, gold_chunks)
+        session.flush()
+
+        rows = list(
+            session.scalars(
+                select(ChunkRow)
+                .where(ChunkRow.filing_id == filing.id)
+                .order_by(ChunkRow.seq)
+            )
+        )
+
+        point_ids = upsert_chunks(
+            rows,
+            accession_number=accession_no,
+            cik=filing.cik,
+            ticker=company.ticker,
+            form_type=filing.form_type,
+            filed_at=filing.filed_at,
+        )
+        for row in rows:
+            row.qdrant_point_id = point_ids[row.id]
+
+        filing.status = FilingStatus.EMBEDDED.value
+        emit_event(session, "filing.embedded", accession_no, {"chunk_count": len(rows)})

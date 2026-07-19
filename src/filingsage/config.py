@@ -34,6 +34,13 @@ class Settings(BaseSettings):
         "META", "TSLA", "JPM", "V", "UNH",
     ]
 
+    # Qdrant Cloud cluster (gold-layer hybrid vector store, Week 2 increment
+    # 2). REST API, not gRPC — port 6333. Empty by default; get_client()
+    # doesn't validate these the way EdgarClient validates sec_contact_email,
+    # since Qdrant itself rejects a bad/missing URL or key on first request.
+    qdrant_url: str = ""
+    qdrant_api_key: str = ""
+
     # Local data lake root (gitignored). Prod uses R2 — same layout, different root.
     data_dir: Path = Path("data")
 
