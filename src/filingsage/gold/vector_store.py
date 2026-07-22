@@ -90,7 +90,9 @@ def upsert_chunks(
     Processed EMBED_BATCH_SIZE chunks at a time — embed batch, upsert batch,
     continue — so peak memory is one batch's worth of embeddings, not the
     whole filing's (a large 10-K's ~40 chunks embedded in one call OOM-killed
-    the 512MB worker in production). Qdrant has no transactions: if a later
+    the worker in production — see embedding.py's module docstring for the
+    measured numbers behind EMBED_BATCH_SIZE's value). Qdrant has no
+    transactions: if a later
     batch fails, earlier batches are already durably upserted (harmlessly —
     point ids are stable, so a retry of the whole task just re-upserts them
     identically) and this function raises, which the caller (chunk_and_embed)

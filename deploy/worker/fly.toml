@@ -50,10 +50,16 @@ min_machines_running = 1
   source = "data"
   destination = "/app/data"
 
-# Bumped from the free-tier default 256mb (README → Technical Decisions
-# #23): this process now loads two ONNX models in-memory (BGE-small dense +
-# BM25 sparse, both baked into the image — see ../../Dockerfile) alongside
-# the Celery/SQLAlchemy/pyarrow stack that already ran fine at 256mb.
+# 1GB (README → Technical Decisions #26). This process loads a real ONNX
+# transformer (BGE-small dense) in-memory alongside the Celery/SQLAlchemy/
+# pyarrow/duckdb stack; measured peak during embedding is comfortably under
+# this but not under 512MB, which is why it's 1GB and not less.
+#
+# IMPORTANT: this file is the source of truth applied on every `fly
+# deploy` — a memory bump made via `fly scale` outside of a deploy gets
+# silently reset to whatever's committed here the next time someone
+# deploys. If you scale this live, update this file in the same breath, or
+# the next deploy undoes it (this happened at least once — see decision #26).
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "512mb"
+  memory = "1gb"
