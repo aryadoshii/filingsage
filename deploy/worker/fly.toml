@@ -32,9 +32,14 @@ min_machines_running = 1
 
 # Overrides the image's default CMD (uvicorn) to run the Celery worker
 # instead. concurrency=1, not the dev stack's 2 — sized for this app's
-# memory ceiling (see [[vm]] below).
+# memory ceiling (see [[vm]] below). --without-gossip/--without-mingle:
+# peer-discovery/sync features for MULTI-worker deployments — pure
+# overhead for this single always-on worker with no peers, and part of
+# the Redis command volume that exhausted Upstash's free tier (README →
+# Technical Decisions #25). Doesn't affect `celery inspect ping` or task
+# dispatch, which use a separate control mechanism.
 [processes]
-  app = "celery -A filingsage.worker.celery_app:celery_app worker --loglevel=INFO --concurrency=1"
+  app = "celery -A filingsage.worker.celery_app:celery_app worker --loglevel=INFO --concurrency=1 --without-gossip --without-mingle"
 
 # Bronze/silver land on local disk until the R2 increment (same as
 # docker-compose.prod.yml's named volume) — a Fly Volume, not the

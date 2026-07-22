@@ -61,7 +61,15 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://filingsage:filingsage@postgres:5432/filingsage
       REDIS_URL: redis://redis:6379/0
-    command: ["celery", "-A", "filingsage.worker.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    # --without-gossip/--without-mingle: both are peer-discovery/sync
+    # features for MULTI-worker deployments (gossip continuously
+    # pubsub-announces this worker to others via the broker; mingle
+    # syncs state with other workers at startup) — pure overhead for a
+    # single always-on worker with no peers, and part of the Redis
+    # command volume that exhausted Upstash's free tier (README →
+    # Technical Decisions #25). Does not affect `celery inspect ping`
+    # (below) or task dispatch — those use a separate control mechanism.
+    command: ["celery", "-A", "filingsage.worker.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=2", "--without-gossip", "--without-mingle"]
     volumes:
       - ./src:/app/src
       - ./data:/app/data      # bronze/silver land here — host-visible, matches CLI's local run
