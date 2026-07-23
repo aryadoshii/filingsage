@@ -7,6 +7,7 @@ from datetime import date
 
 from filingsage.config import get_settings
 from filingsage.connectors import EdgarClient, EdgarConnector, FilingRef
+from filingsage.gold.retrieval import search
 from filingsage.parsing.silver import ParseQuarantineError, parse_to_silver
 from filingsage.worker.tasks import ingest_watchlist
 
@@ -77,6 +78,28 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     print("  docker compose logs -f worker")
 
 
+def cmd_search(args: argparse.Namespace) -> None:
+    results = search(
+        args.query,
+        ticker=args.ticker,
+        form_type=args.form_type,
+        since=args.since,
+        limit=args.limit,
+    )
+    if not results:
+        print("No results.")
+        return
+    for i, r in enumerate(results, start=1):
+        snippet = r.text[:160].replace("\n", " ")
+        if len(r.text) > 160:
+            snippet += "..."
+        print(
+            f"{i:>2}. [{r.fusion_score:.4f}] {r.ticker} {r.form_type} {r.filed_at} "
+            f"{r.section} ({r.accession_number})"
+        )
+        print(f"    {snippet}")
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -m filingsage.cli",
@@ -113,6 +136,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     p_ingest.add_argument("--limit", type=int, default=None,
                           help="Most recent filings to ingest per ticker (default: all discovered)")
     p_ingest.set_defaults(func=cmd_ingest)
+
+    p_search = sub.add_parser(
+        "search", help="Hybrid dense+sparse search over embedded filing chunks (spec §6)"
+    )
+    p_search.add_argument("query", help="Free-text query")
+    p_search.add_argument("--ticker", default=None, help="Restrict to one ticker, e.g. GOOGL")
+    p_search.add_argument("--form-type", default=None, dest="form_type",
+                          help="Restrict to one form type, e.g. 10-K")
+    p_search.add_argument("--since", type=date.fromisoformat, default=None,
+                          help="Only filings on/after this date (YYYY-MM-DD)")
+    p_search.add_argument("--limit", type=int, default=10,
+                          help="Max results to print (default 10; spec default is 40)")
+    p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args(argv)
     args.func(args)
