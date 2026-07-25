@@ -11,7 +11,17 @@ from __future__ import annotations
 import json
 from datetime import date
 
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from testcontainers.postgres import PostgresContainer
+
+import filingsage.db.session as db_session
 import filingsage.gold.qa as qa
+from filingsage.db.models import Chunk as ChunkRow
+from filingsage.db.models import Company, Filing
 from filingsage.gold.retrieval import SearchResult
 
 
@@ -130,3 +140,61 @@ def test_provider_fallback_on_groq_failure(monkeypatch):
     assert answer.answer == "Answered by Gemini."
     assert answer.confidence == "medium"
     assert answer.insufficient_evidence is False
+
+
+@pytest.mark.integration
+def test_resolve_citations_round_trips_a_real_chunk_id(monkeypatch):
+    """The full round-trip a mocked test can't cover: a chunk_id that
+    appears in a real Claim must actually resolve via resolve_citations()'s
+    real query against a real chunks/filings/companies join — not just be
+    among the ids that were retrieved (test_normal_path... above already
+    covers that half). Real Postgres via testcontainers, real alembic
+    migrations, same pattern as tests/test_pipeline.py.
+
+    This is exactly the failure mode found running the CLI for real: a
+    chunk_id can be completely genuine and still resolve to nothing if
+    it's looked up against the wrong database. The second assertion below
+    (a chunk_id with no matching row) encodes that as expected, documented
+    behavior — resolve_citations() must never raise for it.
+    """
+    with PostgresContainer("postgres:16-alpine", driver="psycopg") as pg:
+        url = pg.get_connection_url()
+        cfg = Config("alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", url)
+        command.upgrade(cfg, "head")
+        engine = create_engine(url)
+
+        monkeypatch.setattr(db_session, "_engine", engine)
+        monkeypatch.setattr(
+            db_session, "_session_factory", sessionmaker(bind=engine, expire_on_commit=False)
+        )
+
+        with db_session.session_scope() as session:
+            session.add(Company(cik=999999, ticker="AAPL", name="Apple Inc."))
+            filing = Filing(
+                cik=999999, accession_no="acc-citation-test", form_type="10-K",
+                filed_at=date(2026, 5, 1), primary_document="a.htm",
+            )
+            session.add(filing)
+            session.flush()
+            chunk = ChunkRow(
+                filing_id=filing.id, section="risk_factors", seq=0,
+                text="Competitive risk text.", text_hash="hash-1",
+                char_count=22, token_count=5,
+            )
+            session.add(chunk)
+            session.flush()
+            real_chunk_id = chunk.id
+
+        citations = qa.resolve_citations([real_chunk_id, 999_999_999])
+
+        assert real_chunk_id in citations
+        citation = citations[real_chunk_id]
+        assert citation.ticker == "AAPL"
+        assert citation.form_type == "10-K"
+        assert citation.filed_at == date(2026, 5, 1)
+        assert citation.section == "risk_factors"
+        assert citation.accession_number == "acc-citation-test"
+
+        # a genuine-looking id with no matching row: absent, not an error
+        assert 999_999_999 not in citations

@@ -20,12 +20,17 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import select
 
 from filingsage.config import get_settings
+from filingsage.db.models import Chunk as ChunkRow
+from filingsage.db.models import Company, Filing
+from filingsage.db.session import session_scope
 from filingsage.gold.retrieval import SearchResult, search
 
 logger = logging.getLogger(__name__)
@@ -79,6 +84,64 @@ class Answer(BaseModel):
     claims: list[Claim] = Field(default_factory=list)
     confidence: Literal["high", "medium", "low"]
     insufficient_evidence: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkCitation:
+    """A claim's chunk_id, joined back to the filing/company metadata
+    needed to actually display a citation (ticker, form, date, section) —
+    the `chunks` table itself only stores section/seq/text/hashes, not
+    ticker/form_type/filed_at, so displaying a citation always means
+    joining back to `filings`/`companies`.
+    """
+
+    chunk_id: int
+    ticker: str
+    form_type: str
+    filed_at: date
+    section: str
+    accession_number: str
+
+
+def resolve_citations(chunk_ids: list[int]) -> dict[int, ChunkCitation]:
+    """Join chunk_ids back to filing/company metadata for display.
+
+    Library-level, not CLI-level, on purpose: the CLI's claim printout and
+    the eventual API response both need this exact join, and this project's
+    own convention is that logic like this lives where tests can reach it,
+    not inline in a command handler.
+
+    Returns only the ids that actually resolved — a chunk_id with no
+    matching row is simply absent from the result, never an error. That's
+    not a hypothetical: it's exactly what happens if this is queried
+    against a different Postgres than the one the chunk_ids' embeddings
+    were actually upserted from (e.g. a local DATABASE_URL while search()
+    is pointed at a production Qdrant cluster) — the ids are real, just not
+    in the database being asked.
+    """
+    if not chunk_ids:
+        return {}
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                ChunkRow.id, ChunkRow.section, Filing.accession_no,
+                Filing.form_type, Filing.filed_at, Company.ticker,
+            )
+            .join(Filing, Filing.id == ChunkRow.filing_id)
+            .join(Company, Company.cik == Filing.cik)
+            .where(ChunkRow.id.in_(chunk_ids))
+        ).all()
+    return {
+        row.id: ChunkCitation(
+            chunk_id=row.id,
+            ticker=row.ticker,
+            form_type=row.form_type,
+            filed_at=row.filed_at,
+            section=row.section,
+            accession_number=row.accession_no,
+        )
+        for row in rows
+    }
 
 
 def _insufficient_evidence() -> Answer:

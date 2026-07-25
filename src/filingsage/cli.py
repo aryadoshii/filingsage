@@ -5,14 +5,9 @@ import argparse
 from collections.abc import Sequence
 from datetime import date
 
-from sqlalchemy import select
-
 from filingsage.config import get_settings
 from filingsage.connectors import EdgarClient, EdgarConnector, FilingRef
-from filingsage.db.models import Chunk as ChunkRow
-from filingsage.db.models import Company, Filing
-from filingsage.db.session import session_scope
-from filingsage.gold.qa import answer_question
+from filingsage.gold.qa import answer_question, resolve_citations
 from filingsage.gold.retrieval import search
 from filingsage.parsing.silver import ParseQuarantineError, parse_to_silver
 from filingsage.worker.recovery import (
@@ -148,29 +143,20 @@ def cmd_ask(args: argparse.Namespace) -> None:
         return
 
     all_chunk_ids = sorted({cid for claim in result.claims for cid in claim.chunk_ids})
-    with session_scope() as session:
-        rows = session.execute(
-            select(
-                ChunkRow.id, ChunkRow.section, Filing.accession_no,
-                Filing.form_type, Filing.filed_at, Company.ticker,
-            )
-            .join(Filing, Filing.id == ChunkRow.filing_id)
-            .join(Company, Company.cik == Filing.cik)
-            .where(ChunkRow.id.in_(all_chunk_ids))
-        ).all()
-    chunk_info = {row.id: row for row in rows}
+    citations = resolve_citations(all_chunk_ids)
 
     print("\nClaims:")
     for claim in result.claims:
         print(f"  - {claim.text}")
         for cid in claim.chunk_ids:
-            info = chunk_info.get(cid)
-            if info is None:
-                print(f"      [chunk {cid}] (not found in chunks table)")
+            citation = citations.get(cid)
+            if citation is None:
+                print(f"      [chunk {cid}] (not found — is DATABASE_URL pointed at the "
+                      "same DB the embeddings came from?)")
                 continue
             print(
-                f"      [chunk {cid}] {info.ticker} {info.form_type} {info.filed_at} "
-                f"{info.section} ({info.accession_no})"
+                f"      [chunk {cid}] {citation.ticker} {citation.form_type} "
+                f"{citation.filed_at} {citation.section} ({citation.accession_number})"
             )
 
 
