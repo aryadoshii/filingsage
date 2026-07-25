@@ -9,6 +9,11 @@ from filingsage.config import get_settings
 from filingsage.connectors import EdgarClient, EdgarConnector, FilingRef
 from filingsage.gold.retrieval import search
 from filingsage.parsing.silver import ParseQuarantineError, parse_to_silver
+from filingsage.worker.recovery import (
+    RECOVERY_BATCH_DELAY_SECONDS,
+    RECOVERY_BATCH_SIZE,
+    recover_stale_filings,
+)
 from filingsage.worker.tasks import ingest_watchlist
 
 
@@ -100,6 +105,31 @@ def cmd_search(args: argparse.Namespace) -> None:
         print(f"    {snippet}")
 
 
+def cmd_recover_stale(args: argparse.Namespace) -> None:
+    plan = recover_stale_filings(
+        dry_run=args.dry_run,
+        batch_size=args.batch_size,
+        batch_delay_seconds=args.batch_delay,
+    )
+    verb = "Would reset" if args.dry_run else "Reset"
+    print(f"{len(plan.intact)} filing(s) intact on disk — left untouched.")
+    print(f"{verb} {len(plan.reset)} filing(s) to DISCOVERED (bronze missing).")
+    if args.dry_run:
+        if plan.reset:
+            print("\nRe-run without --dry-run to reset these and re-enqueue fetch_filing:")
+            for accession_no in plan.reset[:20]:
+                print(f"  {accession_no}")
+            if len(plan.reset) > 20:
+                print(f"  ... and {len(plan.reset) - 20} more")
+    elif plan.reset:
+        print(
+            f"\nRe-enqueued fetch_filing for all {len(plan.reset)} in batches of "
+            f"{args.batch_size}, {args.batch_delay:.0f}s apart — this will take "
+            f"roughly {(len(plan.reset) / args.batch_size) * args.batch_delay / 60:.0f} "
+            "minutes to finish enqueueing."
+        )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -m filingsage.cli",
@@ -149,6 +179,28 @@ def main(argv: Sequence[str] | None = None) -> None:
     p_search.add_argument("--limit", type=int, default=10,
                           help="Max results to print (default 10; spec default is 40)")
     p_search.set_defaults(func=cmd_search)
+
+    p_recover = sub.add_parser(
+        "recover-stale",
+        help=(
+            "Reset filings whose bronze/silver were lost on disk (e.g. a "
+            "destroyed/recreated volume) back to DISCOVERED and re-enqueue "
+            "fetch_filing — see README → Technical Decisions #27"
+        ),
+    )
+    p_recover.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would be reset/re-enqueued without changing anything",
+    )
+    p_recover.add_argument(
+        "--batch-size", type=int, default=RECOVERY_BATCH_SIZE,
+        help=f"fetch_filing tasks to enqueue per batch (default {RECOVERY_BATCH_SIZE})",
+    )
+    p_recover.add_argument(
+        "--batch-delay", type=float, default=RECOVERY_BATCH_DELAY_SECONDS,
+        help=f"Seconds to wait between batches (default {RECOVERY_BATCH_DELAY_SECONDS:.0f})",
+    )
+    p_recover.set_defaults(func=cmd_recover_stale)
 
     args = parser.parse_args(argv)
     args.func(args)
