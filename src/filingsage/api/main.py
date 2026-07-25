@@ -101,19 +101,32 @@ class QARequest(BaseModel):
 
 
 def _client_ip(request: Request) -> str:
-    """Best-effort real client IP behind Fly + Cloudflare Tunnel.
+    """Real client IP through Fly's edge — no Cloudflare Tunnel in front of
+    this app (that was the pre-Fly Oracle VM plan, README → Technical
+    Decisions #21; docker-compose.prod.yml's Cloudflare comment is a leftover
+    from that superseded plan, not something this app actually sits behind).
+    Fly's own edge/proxy terminates TLS directly (fly.toml's [http_service]).
 
-    Prefers X-Forwarded-For's first entry (the original client, per the
-    standard chained-proxy convention) over request.client.host, which
-    behind a tunnel is the tunnel/proxy's own address, not the visitor's.
-    NOT independently verified against the actual production proxy chain —
-    confirm which header Fly/Cloudflare actually populate once this is
-    live behind the real domain; may need Fly-Client-IP or
-    CF-Connecting-IP instead.
+    Verified directly against the live deployment (temporary /internal/
+    debug-headers route, curled from outside Fly's network, then removed):
+      - Fly-Client-IP: exactly one value, the real originating connection
+        IP. Sending a forged `Fly-Client-IP` header myself had no effect —
+        Fly's edge overwrites it unconditionally with what it actually
+        observed. Trustworthy.
+      - X-Forwarded-For: sending a forged `X-Forwarded-For: 1.2.3.4` got
+        PREPENDED ("1.2.3.4, <real ip>, <fly internal hop>") rather than
+        replaced or rejected — a naive first-entry read is fully
+        attacker-controlled. NOT trustworthy for anything security-relevant
+        (this rate limit included) on this deployment.
+      - request.client.host: always Fly's internal per-machine proxy
+        sidecar (a 172.16.x.x address), never the real visitor, with or
+        without Cloudflare in the picture. Kept only as a last-resort
+        fallback for non-Fly environments (local dev) where neither header
+        is present at all.
     """
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
+    fly_client_ip = request.headers.get("fly-client-ip")
+    if fly_client_ip:
+        return fly_client_ip
     return request.client.host if request.client else "unknown"
 
 

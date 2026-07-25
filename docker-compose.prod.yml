@@ -1,5 +1,16 @@
 name: filingsage
 
+# SUPERSEDED — not what actually runs in production. This was the Oracle
+# VM plan; it was abandoned for Fly.io (README → Technical Decisions #21)
+# before ever being deployed. Kept only as historical reference. The real
+# prod config is fly.toml + deploy/worker/fly.toml — Fly's own edge/proxy
+# is the public entry point there (fly.toml's [http_service]), NOT
+# Cloudflare Tunnel; the Cloudflare comment below described THIS
+# abandoned plan's network topology, not the current one, and was the
+# source of real confusion about which applies to filingsage-api
+# (resolved by directly probing the live deployment's headers — see
+# api/main.py's _client_ip()).
+#
 # Runs on the Oracle VM. No postgres/redis containers — prod uses Neon
 # (Postgres) and Upstash (Redis), reached via DATABASE_URL/REDIS_URL in
 # .env.prod. No bind mounts, no --reload: the image is the deployable unit,
