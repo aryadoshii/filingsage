@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     qdrant_url: str = ""
     qdrant_api_key: str = ""
 
+    # Cited Q&A (gold/qa.py, Week 2 increment 4). Groq is primary (spec:
+    # Llama 3.3 70B) — free/fast inference; Gemini Flash is the fallback on
+    # Groq failure/timeout/rate-limit. Both empty by default; qa.py doesn't
+    # validate these upfront the same way EdgarClient validates
+    # sec_contact_email, since each provider's SDK rejects a bad/missing key
+    # on first call, and a missing key on ONE provider shouldn't prevent the
+    # other from working.
+    groq_api_key: str = ""
+    gemini_api_key: str = ""
+
     # Local data lake root (gitignored). Prod uses R2 — same layout, different root.
     data_dir: Path = Path("data")
 

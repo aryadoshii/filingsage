@@ -5,8 +5,14 @@ import argparse
 from collections.abc import Sequence
 from datetime import date
 
+from sqlalchemy import select
+
 from filingsage.config import get_settings
 from filingsage.connectors import EdgarClient, EdgarConnector, FilingRef
+from filingsage.db.models import Chunk as ChunkRow
+from filingsage.db.models import Company, Filing
+from filingsage.db.session import session_scope
+from filingsage.gold.qa import answer_question
 from filingsage.gold.retrieval import search
 from filingsage.parsing.silver import ParseQuarantineError, parse_to_silver
 from filingsage.worker.recovery import (
@@ -130,6 +136,44 @@ def cmd_recover_stale(args: argparse.Namespace) -> None:
         )
 
 
+def cmd_ask(args: argparse.Namespace) -> None:
+    result = answer_question(
+        args.query, ticker=args.ticker, form_type=args.form_type, since=args.since
+    )
+
+    print(result.answer)
+    print(f"\nConfidence: {result.confidence}  |  Insufficient evidence: {result.insufficient_evidence}")
+
+    if not result.claims:
+        return
+
+    all_chunk_ids = sorted({cid for claim in result.claims for cid in claim.chunk_ids})
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                ChunkRow.id, ChunkRow.section, Filing.accession_no,
+                Filing.form_type, Filing.filed_at, Company.ticker,
+            )
+            .join(Filing, Filing.id == ChunkRow.filing_id)
+            .join(Company, Company.cik == Filing.cik)
+            .where(ChunkRow.id.in_(all_chunk_ids))
+        ).all()
+    chunk_info = {row.id: row for row in rows}
+
+    print("\nClaims:")
+    for claim in result.claims:
+        print(f"  - {claim.text}")
+        for cid in claim.chunk_ids:
+            info = chunk_info.get(cid)
+            if info is None:
+                print(f"      [chunk {cid}] (not found in chunks table)")
+                continue
+            print(
+                f"      [chunk {cid}] {info.ticker} {info.form_type} {info.filed_at} "
+                f"{info.section} ({info.accession_no})"
+            )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -m filingsage.cli",
@@ -201,6 +245,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         help=f"Seconds to wait between batches (default {RECOVERY_BATCH_DELAY_SECONDS:.0f})",
     )
     p_recover.set_defaults(func=cmd_recover_stale)
+
+    p_ask = sub.add_parser(
+        "ask", help="Cited Q&A over embedded filing chunks (spec §6 step 4, straight RAG)"
+    )
+    p_ask.add_argument("query", help="Free-text question")
+    p_ask.add_argument("--ticker", default=None, help="Restrict to one ticker, e.g. GOOGL")
+    p_ask.add_argument("--form-type", default=None, dest="form_type",
+                       help="Restrict to one form type, e.g. 10-K")
+    p_ask.add_argument("--since", type=date.fromisoformat, default=None,
+                       help="Only filings on/after this date (YYYY-MM-DD)")
+    p_ask.set_defaults(func=cmd_ask)
 
     args = parser.parse_args(argv)
     args.func(args)

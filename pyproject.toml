@@ -27,6 +27,16 @@ dependencies = [
     # client that works identically against local/in-memory Qdrant (tests)
     # and Qdrant Cloud (prod) with just a different URL.
     "qdrant-client>=1.13",
+    # Groq's official client — cited Q&A's primary LLM provider
+    # (gold/qa.py), free/fast Llama inference with a JSON-mode chat
+    # completions API.
+    "groq>=1.6",
+    # Google's current unified GenAI SDK — cited Q&A's fallback provider
+    # (Gemini Flash). Chosen over the older google-generativeai package
+    # because it takes a Pydantic model directly as response_schema and
+    # hands back an already-validated object (response.parsed), rather than
+    # us hand-parsing JSON for this provider too.
+    "google-genai>=2.14",
 ]
 
 [project.optional-dependencies]
