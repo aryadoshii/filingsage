@@ -12,7 +12,7 @@ Celery worker are **two separate Fly apps** built from the same repo-root
 
 | App | Config | Role | Region |
 |---|---|---|---|
-| `filingsage-api` | `fly.toml` (repo root) | uvicorn, public via Fly's proxy | `bom` (Mumbai) |
+| `filingsage-api` | `deploy/api/fly.toml` | uvicorn, public via Fly's proxy | `bom` (Mumbai) |
 | `filingsage-worker` | `deploy/worker/fly.toml` | Celery worker, no public ingress | `sin` (Singapore) |
 
 The two apps are in **different** regions, not a typo: `bom`'s Always Free
@@ -32,8 +32,8 @@ Upstash URLs to exist first.
 - [ ] Upstash Redis connection string on hand (`rediss://...`, TLS scheme)
 - [ ] A freshly generated `INGEST_TOKEN` for prod (do **not** reuse the dev
       `.env`'s token): `python -c "import secrets; print(secrets.token_urlsafe(32))"`
-- [ ] Confirm both regions: `fly platform regions` — `fly.toml` (api) assumes
-      `bom`, `deploy/worker/fly.toml` assumes `sin` (bom's Always Free
+- [ ] Confirm both regions: `fly platform regions` — `deploy/api/fly.toml`
+      assumes `bom`, `deploy/worker/fly.toml` assumes `sin` (bom's Always Free
       capacity proved constrained for volume-attached machines specifically —
       see the table above). If capacity has shifted since, adjust
       `primary_region` in the relevant file before continuing; the two apps
@@ -107,14 +107,14 @@ triggered on migration file changes. See README.md → Technical Decisions #22.
 ## 5. First deploy of each app
 
 ```bash
-fly deploy --config fly.toml                     # filingsage-api (repo root)
+fly deploy --config deploy/api/fly.toml           # filingsage-api
 fly deploy --config deploy/worker/fly.toml        # filingsage-worker
 ```
 
 Validate config syntax before deploying if you want a sanity check first:
 
 ```bash
-fly config validate --config fly.toml
+fly config validate --config deploy/api/fly.toml
 fly config validate --config deploy/worker/fly.toml
 ```
 
@@ -139,7 +139,7 @@ GitHub (Settings → Secrets and variables → Actions), not here:
 ## Redeploying after code changes
 
 ```bash
-fly deploy --config fly.toml
+fly deploy --config deploy/api/fly.toml
 fly deploy --config deploy/worker/fly.toml
 ```
 

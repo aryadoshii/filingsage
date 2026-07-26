@@ -3,7 +3,7 @@
 # this same Dockerfile. Manual one-time setup (app create, secrets, first
 # deploy): see deploy/README-fly.md.
 #
-# Deploy (from repo root): fly deploy --config fly.toml
+# Deploy (from repo root): fly deploy --config deploy/api/fly.toml
 app = "filingsage-api"
 
 # Nearest Fly region to Mumbai. NOT verified live against `fly platform
@@ -13,9 +13,12 @@ app = "filingsage-api"
 primary_region = "bom"
 
 [build]
-  # Dockerfile is at the repo root, same directory as this file — no
-  # `dockerfile =` override needed (that's only required for the worker
-  # app, whose fly.toml lives in a subdirectory).
+  # Path is relative to THIS file's directory (deploy/api/), resolving to
+  # the shared repo-root Dockerfile — same pattern as deploy/worker/fly.toml.
+  # flyctl uses that Dockerfile's directory (the repo root) as the build
+  # context, required since the Dockerfile COPYs pyproject.toml and src/
+  # from there.
+  dockerfile = "../../Dockerfile"
 
 [http_service]
   internal_port = 8000

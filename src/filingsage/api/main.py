@@ -105,7 +105,8 @@ def _client_ip(request: Request) -> str:
     this app (that was the pre-Fly Oracle VM plan, README → Technical
     Decisions #21; docker-compose.prod.yml's Cloudflare comment is a leftover
     from that superseded plan, not something this app actually sits behind).
-    Fly's own edge/proxy terminates TLS directly (fly.toml's [http_service]).
+    Fly's own edge/proxy terminates TLS directly (deploy/api/fly.toml's
+    [http_service]).
 
     Verified directly against the live deployment (temporary /internal/
     debug-headers route, curled from outside Fly's network, then removed):

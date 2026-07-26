@@ -1,5 +1,5 @@
 # Fly.io app config for the Celery worker. Same Dockerfile as the API app
-# (../../fly.toml), different Fly app and a command override — Fly's model
+# (../api/fly.toml), different Fly app and a command override — Fly's model
 # is one app = one process, so "API + worker from one image" means two
 # separate `fly apps create` + two fly.toml files, not one app with two
 # processes. Manual one-time setup: see ../README-fly.md.

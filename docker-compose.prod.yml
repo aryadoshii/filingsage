@@ -3,8 +3,9 @@ name: filingsage
 # SUPERSEDED — not what actually runs in production. This was the Oracle
 # VM plan; it was abandoned for Fly.io (README → Technical Decisions #21)
 # before ever being deployed. Kept only as historical reference. The real
-# prod config is fly.toml + deploy/worker/fly.toml — Fly's own edge/proxy
-# is the public entry point there (fly.toml's [http_service]), NOT
+# prod config is deploy/api/fly.toml + deploy/worker/fly.toml — Fly's own
+# edge/proxy is the public entry point there (deploy/api/fly.toml's
+# [http_service]), NOT
 # Cloudflare Tunnel; the Cloudflare comment below described THIS
 # abandoned plan's network topology, not the current one, and was the
 # source of real confusion about which applies to filingsage-api
