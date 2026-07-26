@@ -1,0 +1,90 @@
+# Technical Decisions
+
+Non-obvious choices, with reasoning. Each entry names the alternative rejected and the threshold at which it'd be revisited.
+
+Summary of the most interesting ones lives in the [README](../README.md#notable-technical-decisions).
+
+---
+
+1. **DuckDB + Parquet over Spark/Iceberg** — data volume is single-digit GB; a distributed engine solves a problem we don't have. Revisit if silver-layer volume or query concurrency outgrows a single node.
+
+2. **GitHub Actions cron over Airflow/Dagster** — three scheduled jobs don't justify an orchestrator stack. Migration criteria: job-dependency graph complexity, not job count.
+
+3. **Qdrant hybrid (dense + sparse in one store) over a separate BM25 service** — one store, native fusion, less to operate.
+
+4. **Celery + Redis over Kafka** — event-driven design with queue transport; every pipeline step emits an `events` row and chains the next task. Redpanda slots into this seam if event volume ever justifies it.
+
+5. **Single VM + Docker Compose over Kubernetes** — k3s migration is deliberately Phase 3.
+
+6. **Self-hosted embedding/rerank/NLI models on the 24 GB ARM VM over per-call APIs** — cost and latency control.
+
+7. **US/EDGAR before India (NSE/BSE)** — official free API vs ToS-grey scraping; India connector is roadmap.
+
+8. **Research tool, not advice** — product stance, regulatory hygiene, and consistent with prior quant research findings (IC ≈ 0).
+
+9. **One container image for API and Celery worker** — same code and dependencies, different command. A second image adds build/maintenance cost with no isolation benefit at this scale; the model sidecar *will* be a separate image because its torch stack is heavy and orthogonal.
+
+10. **No Postgres client library until the schema lands** — the API doesn't touch the database yet; dependencies enter the tree at the point of first use, and the dev stack's DB health is checked at the container level (`pg_isready`).
+
+11. **Celery `task_acks_late` + `worker_prefetch_multiplier=1`** — at-least-once delivery for long-running ingestion tasks: a worker crash requeues the filing instead of losing it. Safe because pipeline tasks are idempotent (keyed by accession number; bronze writes are immutable).
+
+12. **8-K sections use full item passthrough with curated canonical names** — unmapped items get generic keys with the document's own heading as the title. Quarantine strictly means parse failure, never scope exclusion, so the quarantine-rate metric stays honest. 10-K/10-Q keep a curated item set by design (their catalogs contain true boilerplate).
+
+13. **Sync httpx client for ingestion, async for the API** — connectors run inside Celery prefork workers where async adds complexity without concurrency benefit at watchlist scale; httpx keeps one HTTP library across both worlds.
+
+14. **Hand-rolled rate limiter and backoff over tenacity** — ~25 lines total, fully explainable, with SEC-specific behavior (403 as throttle signal, Retry-After honored, jitter). A retry library would be our first dependency we couldn't defend line-by-line.
+
+15. **Discovery scope = EDGAR's `recent` submissions window (~1,000 filings/company)** — years of history, right-sized for a monitoring product; full-history backfill is a non-goal for v1.
+
+16. **String status column + code validation over Postgres ENUM** — PG enum changes are DDL migrations; the pipeline's status vocabulary will grow, and a String(32) with a Python enum keeps that free.
+
+17. **`events` as a lightweight transactional outbox** — `emit_event` joins the caller's transaction instead of committing, so state changes and their audit events are atomic. Events can never lie about what the database contains.
+
+18. **psycopg3 as the single Postgres driver** — one driver serving sync (Celery workers) and async (FastAPI) from the same codebase; binary wheels for zero-compile installs on arm64.
+
+19. **Dev Postgres runs only in Docker; native Postgres stopped** — a host-level Postgres on 5432 silently intercepts `localhost` connections ahead of Docker's port proxy. One database per port, and ours is the container.
+
+20. **Atomic writes everywhere data lands (tmp + rename)** — bronze documents and silver Parquet both; a crash mid-write can never leave truncated output that a later run mistakes for valid data.
+
+21. **Fly.io over Oracle/Terraform** — Oracle Always Free ARM capacity was unavailable in the Mumbai region across multiple signup attempts; Fly's free allowance has no equivalent capacity roulette and doesn't spin down idle apps (the two properties that mattered most: an always-on API for the cron trigger and live users, without gambling on regional stock). The API app runs in `bom`; the worker app runs in `sin` after `bom` also proved capacity-constrained specifically for volume-attached machines (the worker mounts a Fly Volume for bronze/silver).
+
+22. **Database migrations run manually against Neon, not part of any deploy step (yet)** — `alembic upgrade head` isn't wired into `fly deploy` or `fly.toml`, so a freshly-provisioned Neon database has no schema until it's run by hand. This is a known gap, not a design choice: it caused a real production `UndefinedTable` error on the first real ingest against a fresh database. Tracked as a manual step in `deploy/README-fly.md` until automated — candidates are a Fly `release_command` or a one-off GitHub Actions job on migration-file changes.
+
+23. **FastEmbed in-worker over self-hosted PyTorch models on a 24GB VM** — the spec's original plan assumed a 24GB Oracle ARM VM for self-hosted embedding/rerank/NLI models (decision #6); that VM never existed (decision #21). The worker runs on Fly at 1GB (originally 512MB — see decision #26 for why that grew). FastEmbed (Qdrant's ONNX-based library — BGE-small dense + BM25-family sparse) fits that ceiling where a full PyTorch stack wouldn't, and the spec's own fallback clause explicitly permits moving embeddings to a hosted/lightweight option when the VM plan falls through. This preserves decision #6's actual rationale (self-hosted, no per-call inference cost) on different hardware, rather than abandoning it for a paid embeddings API. Revisit if chunk volume ever demands GPU throughput ONNX-CPU can't deliver.
+
+24. **Rerank + NLI verification deferred to a later increment** — the spec itself frames retrieval as staged (naive → hybrid → +rerank → +verification), so hybrid retrieval and cited Q&A ship first as a working, measurable baseline; cross-encoder rerank and NLI-based claim verification land as measured improvements on top of it rather than blocking the first usable version. Revisit once hybrid retrieval has a baseline precision/citation-accuracy number to improve against. *(Update: rerank has since landed — see #29. NLI-based claim verification is still deferred.)*
+
+25. **Tuned Celery's Redis broker traffic after exhausting Upstash's free tier** — a real production incident, not a preemptive optimization: 500K commands/month (Upstash free tier) was used up almost entirely by broker polling/heartbeat overhead on an otherwise-idle worker, confirmed via the Upstash dashboard's usage breakdown at 478k reads vs. 24k writes over several days — a workload that runs a handful of tasks per 2h cron cycle. The quota exhaustion surfaced as `"Unrecoverable error: max requests limit exceeded"`, which crash-looped the worker's ability to even connect (unrelated to the separate OOM issue). Fix: `broker_transport_options={"polling_interval": 2.0}` (kombu's redis transport otherwise polls sub-second, tuned for a busy broker, not ours), `broker_heartbeat=300` (loosened from the default 120s rather than disabled outright — this worker sits idle for up to ~2h between cron bursts, exactly where an undetected dead connection to a managed Redis proxy would bite hardest), and `--without-gossip --without-mingle` on the worker command (peer-discovery/sync features for multi-worker deployments, pure overhead with zero peers to discover). Revisit if the watchlist grows enough that per-task volume, not idle polling, becomes the dominant cost.
+
+26. **Measured the embedding OOM instead of guessing further, and found the intuitive fix was wrong** — `chunk_and_embed` OOM-killing the worker (confirmed once via direct SSH call, "Killed", no traceback) was diagnosed for a while as "two ONNX models resident simultaneously" and the natural next step looked like loading dense and sparse one at a time. Measured resident memory instead (`resource.getrusage().ru_maxrss`, cumulative within one process) before implementing that:
+
+    | Stage | RSS |
+    | --- | --- |
+    | Bare interpreter | 13 MB |
+    | Full worker import (Celery/SQLAlchemy/pyarrow/duckdb/fastembed) | 158 MB |
+    | Dense model (BGE-small) loaded | 392 MB |
+    | Sparse model (BM25) **also** loaded | 392 MB (+0.2 MB) |
+    | One embed call, batch=8 | 495 MB |
+    | Same call, batch=40 (pre-fix shape) | 876 MB |
+
+    Two findings followed directly: (1) BM25 isn't a real model here — fastembed's own source gives it `model_file="mock.file"`, no ONNX session at all — so "one model at a time" would have saved ~0.2MB, not fixed anything; the dense model plus per-batch tensor allocation was always the entire cost. (2) If memory ever has to be cut, dropping sparse frees nothing — dropping dense would free the ~250-450MB that actually matters, the *opposite* of the "ship dense-only" fallback assumed going in. Net fix: `EMBED_BATCH_SIZE` 8→4, worker bumped 512MB→1GB, and `deploy/worker/fly.toml` — which had silently drifted to still say `512mb` while a live `fly scale` had pushed the running machine to 1GB — corrected to match, with a comment flagging that this file is reasserted on every `fly deploy`. Separately, the worker began dying silently during boot itself ("Configuring firecracker" then nothing, no Celery banner, ~20-30s to 'stopped') — a Fly-platform-level failure: the measured full-import baseline (158MB) is nowhere near even the old 512MB ceiling, and the log cuts off at a boot stage that predates the container's own process starting, which points at the machine/volume layer rather than application memory. *(Confirmed and resolved — see #27.)*
+
+27. **The decision #26 volume hypothesis was confirmed, and a recovery tool was built for it** — the Fly Volume backing the worker's bronze/silver was in fact destroyed and recreated during that capacity/OOM incident response, silently erasing every bronze `.htm` and silver `.parquet` file written before the recreation while Postgres kept claiming those filings were discovered/fetched/parsed ("phantom complete": 9 discovered, 46 fetched, 951 parsed, only 4 genuinely embedded — the ones written after the new volume existed). This was a data-loss *non-event*, not a disaster, specifically because bronze and silver are both fully re-derivable by design (bronze from EDGAR, silver from bronze by re-parsing) — nothing here required backups, only a way to re-run the pipeline from wherever the disk actually is. `python -m filingsage.cli recover-stale` (`worker/recovery.py`) is that tool, built as a permanent, documented command rather than a one-off script: it checks each non-terminal filing's bronze file against disk (not a guessed timestamp cutoff — actual file existence is simpler and strictly more accurate), resets only the ones missing it back to DISCOVERED, and re-enqueues `fetch_filing` in small batches with a delay between them (default 10 filings / 30s) so hundreds of memory-heavy `chunk_and_embed` tasks don't stack up behind the re-fetch wave and reproduce decision #26's OOM. `--dry-run` reports the plan without writing anything. Known gap, not fixed here: filings whose bronze *is* intact but which are still stuck at `fetched`/`parsed` (not from volume loss, just not yet caught up to `chunk_and_embed`) are deliberately left untouched by this command, per its stated scope.
+
+28. **Spec concern: the spec's named LLM (Groq `llama-3.3-70b-versatile`) is deprecated — swapped for Groq's own recommended replacement, not silently, not by guessing.** Verified via Groq's docs/changelog (not assumed, per the "free tiers drift" rule): Groq deprecated `llama-3.3-70b-versatile` for free/developer-tier usage on 2026-06-17 and recommends `openai/gpt-oss-120b` (an open-weight model Groq itself hosts, not an OpenAI API call) as the replacement — confirmed the new model string is genuinely accepted by the installed `groq` SDK's own type stubs before using it. `GROQ_MODEL` in `gold/qa.py` is a single named constant specifically so this is a one-line swap if Groq's lineup moves again. Gemini fallback uses `gemini-3.5-flash`, not the bleeding-edge `gemini-3.6-flash` that shipped four days before this was written — not enough runway yet to trust a days-old release for a fallback path. Cited Q&A (spec §6 step 4, straight RAG, no agents) otherwise follows spec directly: retrieval's real top-40 stays intact, and `LLM_CONTEXT_TOP_N` (8) chunks reach the prompt — originally a naive cut of the raw fusion order, now the reranked top-8 (see #29); a `SCORE_FLOOR` (0.1) on the top fused score gates the LLM call entirely — below it, "insufficient evidence" is returned with zero network calls, calibrated from real RRF scores observed in increment 3 (~0.15-0.83 for genuine matches) rather than a guess. Provider routing is a plain ordered list + retry-once-then-fallback, not a class hierarchy — per-provider budget tracking is future work.
+
+    **Client-IP handling on `/qa`'s rate limiter was fixed the same way — by testing, not by convention:** `X-Forwarded-For` is the standard header, but forging it against the live deployment showed Fly *prepends* the forged value to the real chain rather than replacing or rejecting it, so a naive `.split(",")[0]` read would have trusted fully attacker-controlled input and left the rate limit trivially bypassable. A forged `Fly-Client-IP` was silently discarded and overwritten with the real connection IP. `_client_ip()` now trusts `Fly-Client-IP`, with `request.client.host` (always Fly's internal `172.16.x.x` sidecar in production) as a fallback for non-Fly local dev only.
+
+29. **Spec concern: the spec's named reranker (`BAAI/bge-reranker-base`) measured at ~2GB to load — swapped for a lighter cross-encoder the spec's own "or similar" wording covers.** Same treatment as the Groq swap (#28): real numbers first. Before writing any rerank code, measured resident memory (`resource.getrusage().ru_maxrss`, same method as #23/#26), standalone, nothing wired in:
+
+    | Model | On-disk | After load | After 40-doc rerank | Total delta |
+    | --- | --- | --- | --- | --- |
+    | `BAAI/bge-reranker-base` | 1.04 GB | 2119.2 MB | 2119.2 MB | **~2041 MB** |
+    | `Xenova/ms-marco-MiniLM-L-6-v2` | 0.08 GB | 296.0 MB | 357.0 MB | ~280 MB |
+    | `Xenova/ms-marco-MiniLM-L-12-v2` | 0.12 GB | 397.4 MB | 467.0 MB | ~390 MB |
+
+    `bge-reranker-base` is more than double the worker's entire 1GB budget and ~4x the API's — not viable without a bump larger than anything else in this project, so not pursued. Went with the L-6 variant: smallest measured footprint that's still a standard, widely-used MS MARCO-trained cross-encoder, not a toy model — stays in FastEmbed/ONNX, no new ML framework (decision #23's reasoning). `RERANK_MODEL` in `gold/rerank.py` is a single named constant, same swap-in-one-line pattern as `GROQ_MODEL`.
+
+    Runs in the API process, not the worker: reranking is part of `/qa`'s synchronous, request-time path (`answer_question()`), a different code path from the worker's async, ingestion-time `chunk_and_embed` — moving it to the worker would require a new synchronous cross-process call that doesn't exist today, a bigger architectural change than "load a model somewhere with more RAM," and wasn't warranted by the measurement. `RERANK_SCORE_FLOOR` is defined but deliberately **not** wired into an active gate yet — unlike `SCORE_FLOOR`, there's no real production rerank-score distribution to calibrate against, and the raw cross-encoder output is an unbounded logit (not a normalized fused score), so a naive threshold risks rejecting everything or nothing.
+
+    **Postscript on sizing:** the API was bumped 512MB → 1GB for this, based on isolated per-model measurements (~230MB embedding + ~280MB rerank + ~160MB import baseline ≈ 670MB). It still OOM'd in production at `anon-rss:874792kB` (~855MB) under real serving conditions — isolated single-call benchmarks undershot the real concurrent-request peak by ~185MB. Recorded here as a pattern worth remembering: **production headroom should exceed isolated benchmarks by a real margin, not match them.** Rerank is committed and locally verified; the hosted deployment is paused pending a deliberate call on running costs.

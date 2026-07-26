@@ -194,7 +194,7 @@ Every non-obvious choice here is documented with its reasoning, the alternative 
 - **Measured before fixing, and the intuitive fix was wrong** — an OOM looked like "two models resident at once." Measuring showed the sparse model costs 0.2MB; FastEmbed's BM25 isn't a neural model at all. The obvious fix would have saved nothing.
 - **A rate limiter that didn't limit anything** — forging `X-Forwarded-For` against the live deployment showed Fly *prepends* rather than replaces, making the limit bypassable by anyone setting a header. `Fly-Client-IP` proved unspoofable under the same test.
 
-📄 **[Full decision log →](docs/DECISIONS.md)** — all 29 entries, including the production incidents and what they cost to learn.
+📄 **[Full decision log →](docs/decisions.md)** — all 29 entries, including the production incidents and what they cost to learn.
 
 ---
 
