@@ -1,65 +1,207 @@
 # FilingSage
 
-An AI research analyst that watches the companies you care about, reads every new SEC filing and piece of news the moment it drops, and tells you — with citations — what actually changed and whether it matters.
+**An AI research analyst that watches SEC filings and answers questions about them — with citations traced back to the exact filing section.**
 
-> **Guiding principle:** *Every major technology must justify its existence. If we can't answer "what business or engineering problem does this solve in our product?", it doesn't go into v1.*
+Point it at a list of tickers. It discovers every new 10-K, 10-Q, and 8-K from SEC EDGAR, parses them into sections, embeds them into a hybrid vector store, and answers natural-language questions with claims mapped to their source. When the filings don't support an answer, it says so instead of guessing.
 
-**Status:** early development (Day 1 of the v1 build plan). This README grows with the system — every metric that ever appears here is measured, reproducible, and dated. No aspirational numbers.
+**Status:** Weeks 1–2 complete and verified end-to-end in production. The full pipeline — discovery → fetch → parse → chunk → embed → hybrid retrieval → rerank → cited generation — runs against real EDGAR data. Weeks 3+ (agent orchestration, email briefs, auth, frontend) are roadmap.
 
-## What it does (v1)
+---
 
-- Watchlist of tickers per user; scheduled ingestion of 10-K / 10-Q / 8-K filings from SEC EDGAR.
-- Cited Q&A over your companies' filings — every claim mapped to the exact source section, verified by an NLI cross-encoder before it reaches you.
-- Unprompted email briefs when a watched company files.
-- Public [/status] page with live system and AI-quality metrics.
-- A research tool, deliberately **not** investment advice.
+## What actually works right now
+
+| Capability | Status |
+| --- | --- |
+| SEC EDGAR ingestion (10-K / 10-Q / 8-K), rate-limited and idempotent | ✅ Shipped |
+| Automated scheduled ingestion — GitHub Actions cron, every 2h | ✅ Shipped |
+| Bronze → silver → gold medallion pipeline | ✅ Shipped |
+| Section-aware parsing across all three form types | ✅ Shipped |
+| Hybrid vector search — BGE-small dense + BM25 sparse, RRF-fused | ✅ Shipped |
+| Cross-encoder reranking, top-40 → top-8 | ✅ Shipped |
+| Cited Q&A — each claim mapped to the chunks supporting it | ✅ Shipped |
+| "Never bluff" gate — insufficient evidence returns with **zero** LLM calls | ✅ Shipped |
+| Public `POST /qa` endpoint with Redis-backed rate limiting | ✅ Shipped |
+| Failure recovery tooling (`recover-stale`) | ✅ Shipped |
+| NLI claim verification | 🗺️ Roadmap |
+| Confidence gate + retrieval retry | 🗺️ Roadmap |
+| LangGraph agent orchestration | 🗺️ Roadmap |
+| Email briefs on new filings | 🗺️ Roadmap |
+| JWT auth + per-user quotas | 🗺️ Roadmap |
+| Web frontend | 🗺️ Roadmap |
+
+**Scale so far:** ~1,000 filings discovered across a 10-ticker watchlist · 87 tests.
+
+---
+
+## A real answer, end to end
+
+```bash
+curl -X POST https://filingsage-api.fly.dev/qa \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What are Apple'\''s main competitive risks?", "ticker": "AAPL"}'
+```
+
+```json
+{
+  "answer": "Apple's competitive risks stem from several sources. First, the company faces aggressive price competition and very low-cost business models from rivals, which puts downward pressure on its gross margins. Second, the markets for its products and services are characterized by rapid technological change, short product life cycles, and frequent new-product introductions...",
+  "claims": [
+    {
+      "text": "Aggressive price competition and low-cost structures of rivals create downward pressure on Apple's gross margins.",
+      "chunk_ids": [2582, 2706, 1550, 1417]
+    },
+    {
+      "text": "Competitors often imitate Apple's products and may infringe on its patents, trademarks and copyrights.",
+      "chunk_ids": [2582, 2706, 1550, 1417]
+    }
+  ],
+  "confidence": "high",
+  "insufficient_evidence": false
+}
+```
+
+Every `chunk_id` resolves back to a specific filing, form type, filing date, and section. Ask it something the corpus can't support and it returns `insufficient_evidence: true` — without calling an LLM at all.
+
+> **Note on the live demo:** the deployment is real and was verified end-to-end in production. The hosted API is currently paused to avoid running costs on a personal project; everything below runs locally against the same managed services.
+
+---
 
 ## Architecture
 
-*(diagram lands with the Week 1 deploy — see `docs/filingsage-spec.md` for the full design)*
+```mermaid
+flowchart TB
+    subgraph ingest["Ingestion — Celery worker"]
+        CRON["GitHub Actions cron<br/>every 2h"] --> API1["POST /internal/ingest"]
+        API1 --> DISC["ingest_watchlist<br/>EDGAR discovery"]
+        DISC --> FETCH["fetch_filing<br/>rate-limited, idempotent"]
+        FETCH --> PARSE["parse_filing<br/>section detection + DQ"]
+        PARSE --> EMBED["chunk_and_embed<br/>batched, memory-capped"]
+    end
+
+    subgraph storage["Storage"]
+        BRONZE[("Bronze<br/>raw HTML")]
+        SILVER[("Silver<br/>sectioned Parquet")]
+        PG[("Neon Postgres<br/>state + event log")]
+        QD[("Qdrant Cloud<br/>dense + sparse vectors")]
+    end
+
+    subgraph serve["Serving — FastAPI"]
+        QA["POST /qa"] --> RET["Hybrid retrieval<br/>RRF fusion, top-40"]
+        RET --> GATE{"Score floor<br/>met?"}
+        GATE -->|no| INSUF["insufficient evidence<br/>0 LLM calls"]
+        GATE -->|yes| RERANK["Cross-encoder rerank<br/>top-40 → top-8"]
+        RERANK --> GEN["Groq → Gemini fallback<br/>structured claims"]
+        GEN --> CITE["Citation resolution<br/>chunk_id → filing/section"]
+    end
+
+    FETCH --> BRONZE
+    PARSE --> SILVER
+    EMBED --> QD
+    DISC & FETCH & PARSE & EMBED --> PG
+    RET --> QD
+    CITE --> PG
+```
+
+**Design commitments worth naming:**
+
+- **Bronze is a cache, not a system of record.** EDGAR is the source of truth; every derived artifact is rebuildable. This turned a destroyed production volume from a disaster into a one-command recovery.
+- **Every state change emits an event in the same transaction** — a transactional outbox, so the audit log can never disagree with the database.
+- **Every pipeline step is idempotent**, keyed by accession number, so at-least-once delivery is safe by construction.
+- **Failures fail closed.** A Qdrant outage mid-embed leaves a filing un-advanced and retryable, never half-embedded and marked done.
+
+---
+
+## The retrieval pipeline
+
+| Stage | What it does | Why |
+| --- | --- | --- |
+| **Chunking** | 384-token windows, 64-token overlap, snapped to word boundaries | Sized *under* BGE-small's 512 ceiling on purpose — leaves room for special tokens, and tighter spans embed more precisely. Boundaries use the same tokenizer the embedder uses. |
+| **Dense embedding** | BGE-small-en-v1.5 (ONNX via FastEmbed) | Semantic similarity — "revenue declined" matches "sales fell" with no shared words. |
+| **Sparse embedding** | BM25-family, IDF modifier enabled | Filings are full of terms that must match *exactly*: ticker symbols, dollar figures, defined terms like "Material Adverse Effect." Pure semantic search drifts on these. |
+| **Fusion** | Qdrant-native Reciprocal Rank Fusion, top-40 | Dense and sparse scores aren't on a comparable scale. RRF fuses by *rank position*, sidestepping normalization entirely. |
+| **Filtering** | Payload filters on ticker / form type / filing date | Applied per-prefetch — a top-level filter is silently ignored on a fusion query. |
+| **Reranking** | MS MARCO MiniLM cross-encoder, top-40 → top-8 | Scores the (query, chunk) pair directly rather than inferring relevance from two independent retrieval signals. |
+| **Generation** | Groq primary, Gemini fallback, Pydantic-validated output | Structured `answer + claims[]`, each claim carrying the chunk IDs it rests on. |
+| **Grounding** | Hallucinated citations dropped before display | If the model cites a chunk it was never shown, that citation is stripped. |
+
+---
+
+## Stack
+
+| Layer | Choice |
+| --- | --- |
+| API | FastAPI · Uvicorn |
+| Async pipeline | Celery · Redis (Upstash) |
+| Database | Postgres (Neon) · SQLAlchemy · Alembic |
+| Vector store | Qdrant Cloud (hybrid: named dense + sparse vectors) |
+| Analytics | DuckDB over silver Parquet |
+| Models | FastEmbed / ONNX — BGE-small, BM25, MS MARCO MiniLM cross-encoder |
+| LLM | Groq (primary) → Gemini (fallback) |
+| Parsing | selectolax (Lexbor) · PyArrow |
+| Deploy | Fly.io (two apps, one image) · Docker · GitHub Actions |
+| Tests | pytest · testcontainers |
+
+---
 
 ## Running locally
 
 ```bash
-cp .env.example .env       # then set SEC_CONTACT_EMAIL
-docker compose up --build
-curl localhost:8000/healthz
+git clone https://github.com/aryadoshii/filingsage
+cd filingsage
+
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+
+cp .env.example .env
+# Required: SEC_CONTACT_EMAIL (SEC fair-access policy mandates a real contact)
+# For retrieval + Q&A: QDRANT_URL, QDRANT_API_KEY, GROQ_API_KEY, GEMINI_API_KEY
+
+docker compose up -d postgres redis
+python -m alembic upgrade head
 ```
 
-## Technical Decisions
+**Ingest, search, ask:**
 
-Non-obvious choices, with reasoning. Each entry names the alternative we rejected and the threshold at which we'd revisit.
+```bash
+python -m filingsage.cli ingest --tickers AAPL --limit 5
+python -m filingsage.cli search "risks related to competition" --ticker AAPL --limit 5
+python -m filingsage.cli ask "What are Apple's main competitive risks?" --ticker AAPL
+```
 
-1. **DuckDB + Parquet over Spark/Iceberg** — data volume is single-digit GB; a distributed engine solves a problem we don't have. Revisit if silver-layer volume or query concurrency outgrows a single node.
-2. **GitHub Actions cron over Airflow/Dagster** — three scheduled jobs don't justify an orchestrator stack. Migration criteria: job-dependency graph complexity, not job count.
-3. **Qdrant hybrid (dense + sparse in one store) over a separate BM25 service** — one store, native fusion, less to operate.
-4. **Celery + Redis over Kafka** — event-driven design with queue transport; every pipeline step emits an `events` row and chains the next task. Redpanda slots into this seam if event volume ever justifies it.
-5. **Single VM + Docker Compose over Kubernetes** — k3s migration is deliberately Phase 3.
-6. **Self-hosted embedding/rerank/NLI models on the 24 GB ARM VM over per-call APIs** — cost and latency control.
-7. **US/EDGAR before India (NSE/BSE)** — official free API vs ToS-grey scraping; India connector is roadmap.
-8. **Research tool, not advice** — product stance, regulatory hygiene, and consistent with prior quant research findings (IC ≈ 0).
-9. **One container image for API and Celery worker** — same code and dependencies, different command. A second image adds build/maintenance cost with no isolation benefit at this scale; the model sidecar *will* be a separate image because its torch stack is heavy and orthogonal.
-10. **No Postgres client library until the schema lands** — the API doesn't touch the database yet; dependencies enter the tree at the point of first use, and the dev stack's DB health is checked at the container level (`pg_isready`).
-11. **Celery `task_acks_late` + `worker_prefetch_multiplier=1`** — at-least-once delivery for long-running ingestion tasks: a worker crash requeues the filing instead of losing it. Safe because pipeline tasks are idempotent (keyed by accession number; bronze writes are immutable).
-12. **8-K sections use full item passthrough with curated canonical names** — unmapped items get generic keys with the document's own heading as the title. Quarantine strictly means parse failure, never scope exclusion, so the quarantine-rate metric stays honest. 10-K/10-Q keep a curated item set by design (their catalogs contain true boilerplate).
-13. **Sync httpx client for ingestion, async for the API** — connectors run inside Celery prefork workers where async adds complexity without concurrency benefit at watchlist scale; httpx keeps one HTTP library across both worlds.
-14. **Hand-rolled rate limiter and backoff over tenacity** — ~25 lines total, fully explainable, with SEC-specific behavior (403 as throttle signal, Retry-After honored, jitter). A retry library would be our first dependency we couldn't defend line-by-line.
-15. **Discovery scope = EDGAR's `recent` submissions window (~1,000 filings/company)** — years of history, right-sized for a monitoring product; full-history backfill is a non-goal for v1.
-16. **String status column + code validation over Postgres ENUM** — PG enum changes are DDL migrations; the pipeline's status vocabulary will grow, and a String(32) with a Python enum keeps that free.
-17. **`events` as a lightweight transactional outbox** — `emit_event` joins the caller's transaction instead of committing, so state changes and their audit events are atomic. Events can never lie about what the database contains.
-18. **psycopg3 as the single Postgres driver** — one driver serving sync (Celery workers) and async (FastAPI) from the same codebase; binary wheels for zero-compile installs on arm64.
-19. **Dev Postgres runs only in Docker; native Postgres stopped** — a host-level Postgres on 5432 silently intercepts `localhost` connections ahead of Docker's port proxy. One database per port, and ours is the container.
-20. **Atomic writes everywhere data lands (tmp + rename)** — bronze documents and silver Parquet both; a crash mid-write can never leave truncated output that a later run mistakes for valid data.
-21. **Fly.io over Oracle/Terraform** — Oracle Always Free ARM capacity was unavailable in the Mumbai region across multiple signup attempts; Fly's free allowance has no equivalent capacity roulette and doesn't spin down idle apps (the two properties that mattered most: an always-on API for the cron trigger and live users, without gambling on regional stock). The API app runs in `bom`; the worker app runs in `sin` after `bom` also proved capacity-constrained specifically for volume-attached machines (the worker mounts a Fly Volume for bronze/silver).
-22. **Database migrations run manually against Neon, not part of any deploy step (yet)** — `alembic upgrade head` isn't wired into `fly deploy` or `fly.toml`, so a freshly-provisioned Neon database has no schema until it's run by hand. This is a known gap, not a design choice: it caused a real production `UndefinedTable` error on the first real ingest against a fresh database. Tracked as a manual step in `deploy/README-fly.md` until automated — candidates are a Fly `release_command` or a one-off GitHub Actions job on migration-file changes.
-23. **FastEmbed in-worker over self-hosted PyTorch models on a 24GB VM** — the spec's original plan assumed a 24GB Oracle ARM VM for self-hosted embedding/rerank/NLI models (decision #6); that VM never existed (decision #21). The worker runs on Fly at 1GB (originally 512MB — see decision #26 for why that grew). FastEmbed (Qdrant's ONNX-based library — BGE-small dense + BM25-family sparse) fits that ceiling where a full PyTorch stack wouldn't, and the spec's own fallback clause explicitly permits moving embeddings to a hosted/lightweight option when the VM plan falls through. This preserves decision #6's actual rationale (self-hosted, no per-call inference cost) on different hardware, rather than abandoning it for a paid embeddings API. Revisit if chunk volume ever demands GPU throughput ONNX-CPU can't deliver.
-24. **Rerank + NLI verification deferred to a later increment** — the spec itself frames retrieval as staged (naive → hybrid → +rerank → +verification), so hybrid retrieval and cited Q&A ship first as a working, measurable baseline; cross-encoder rerank and NLI-based claim verification land as measured improvements on top of it rather than blocking the first usable version. Revisit once hybrid retrieval has a baseline precision/citation-accuracy number to improve against. *(Update: rerank has since landed — see #29. NLI-based claim verification is still deferred.)*
-25. **Tuned Celery's Redis broker traffic after exhausting Upstash's free tier** — a real production incident, not a preemptive optimization: 500K commands/month (Upstash free tier) was used up almost entirely by broker polling/heartbeat overhead on an otherwise-idle worker, confirmed via the Upstash dashboard's usage breakdown at 478k reads vs. 24k writes over several days — a workload that runs a handful of tasks per 2h cron cycle. The quota exhaustion surfaced as `"Unrecoverable error: max requests limit exceeded"`, which crash-looped the worker's ability to even connect (unrelated to the separate, still-unresolved OOM issue). Fix: `broker_transport_options={"polling_interval": 2.0}` (kombu's redis transport otherwise polls sub-second, tuned for a busy broker, not ours), `broker_heartbeat=300` (loosened from the default 120s rather than disabled outright — this worker sits idle for up to ~2h between cron bursts, exactly where an undetected dead connection to a managed Redis proxy would bite hardest), and `--without-gossip --without-mingle` on the worker command (peer-discovery/sync features for multi-worker deployments, pure overhead with zero peers to discover). Revisit if the watchlist grows enough that per-task volume, not idle polling, becomes the dominant cost.
-26. **Measured the embedding OOM instead of guessing further, and found the intuitive fix was wrong** — `chunk_and_embed` OOM-killing the worker (confirmed once via direct SSH call, "Killed", no traceback) was diagnosed for a while as "two ONNX models resident simultaneously" and the natural next step looked like loading dense and sparse one at a time. Measured resident memory instead (`resource.getrusage().ru_maxrss`, cumulative within one process) before implementing that: bare interpreter 13MB → full worker import (Celery/SQLAlchemy/pyarrow/duckdb/fastembed) 158MB → dense model (BGE-small) loaded 392MB → sparse model (BM25) *also* loaded 392MB (+0.2MB) → one embed call at batch=8, 495MB → the same call at batch=40 (the pre-batching-fix shape), 876MB. Two findings followed directly: (1) BM25 isn't a real model here — fastembed's own source gives it `model_file="mock.file"`, no ONNX session at all — so "one model at a time" would have saved ~0.2MB, not fixed anything; the dense model plus per-batch tensor allocation was always the entire cost. (2) If memory ever has to be cut, dropping sparse (BM25) frees nothing — dropping dense would free the ~250-450MB that actually matters, the *opposite* of the "ship dense-only" fallback assumed going in. Net fix: `EMBED_BATCH_SIZE` 8→4 for headroom margin (the one lever that measurably scales), worker bumped 512MB→1GB, and `deploy/worker/fly.toml` — which had silently drifted to still say `512mb` while a live `fly scale` had (apparently) pushed the running machine to 1GB — corrected to match, with a comment flagging that this file is reasserted on every `fly deploy`. Separately, the worker began dying silently during boot itself ("Configuring firecracker" then nothing, no Celery banner, ~20-30s to 'stopped') — a Fly-platform-level failure, not caught by any of the above: the measured full-import baseline (158MB) is nowhere near even the old 512MB ceiling, and the log cuts off at a boot stage that predates the container's own process starting, which points at the machine/volume layer (most likely a Fly Volume left in a stuck attachment state by an earlier unclean OOM kill) rather than at application memory. Unresolved pending a `fly volumes`/`fly machine status` check.
-27. **The decision #26 volume hypothesis was confirmed, and a recovery tool was built for it** — the Fly Volume backing the worker's bronze/silver was in fact destroyed and recreated during that capacity/OOM incident response, silently erasing every bronze `.htm` and silver `.parquet` file written before the recreation while Postgres kept claiming those filings were discovered/fetched/parsed ("phantom complete": 9 discovered, 46 fetched, 951 parsed, only 4 genuinely embedded — the ones written after the new volume existed). This was a data-loss *non-event*, not a disaster, specifically because bronze and silver are both fully re-derivable by design (bronze from EDGAR, silver from bronze by re-parsing) — nothing here required backups, only a way to re-run the pipeline from wherever the disk actually is. `python -m filingsage.cli recover-stale` (`worker/recovery.py`) is that tool, built as a permanent, documented command rather than a one-off script: it checks each non-terminal filing's bronze file against disk (not a guessed timestamp cutoff — actual file existence is simpler and strictly more accurate), resets only the ones missing it back to DISCOVERED, and re-enqueues `fetch_filing` in small batches with a delay between them (default 10 filings / 30s) so hundreds of memory-heavy `chunk_and_embed` tasks don't stack up behind the re-fetch wave and reproduce decision #26's OOM. `--dry-run` reports the plan without writing anything. Known gap, not fixed here: filings whose bronze *is* intact but which are still stuck at `fetched`/`parsed` (not from volume loss, just not yet caught up to `chunk_and_embed`) are deliberately left untouched by this command, per its stated scope — they need a separate mechanism if they don't self-resolve.
-28. **Spec concern: the spec's named LLM (Groq `llama-3.3-70b-versatile`) is deprecated — swapped for Groq's own recommended replacement, not silently, not by guessing.** Verified via Groq's docs/changelog (not assumed, per the "free tiers drift" rule): Groq deprecated `llama-3.3-70b-versatile` for free/developer-tier usage on 2026-06-17 and recommends `openai/gpt-oss-120b` (an open-weight model Groq itself hosts, not an OpenAI API call) as the replacement — confirmed the new model string is genuinely accepted by installed `groq` SDK's own type stubs before using it. `GROQ_MODEL` in `gold/qa.py` is a single named constant specifically so this is a one-line swap if Groq's lineup moves again. Gemini fallback uses `gemini-3.5-flash`, not the bleeding-edge `gemini-3.6-flash` that shipped four days before this was written — not enough runway yet to trust a days-old release for a fallback path. Cited Q&A (spec §6 step 4, straight RAG, no agents) otherwise follows spec directly: retrieval's real top-40 stays intact, and `LLM_CONTEXT_TOP_N` (8) chunks reach the prompt — originally a naive cut of the raw fusion order, now the reranked top-8 (see #29); a `SCORE_FLOOR` (0.1) on the top fused score gates the LLM call entirely — below it, "insufficient evidence" is returned with zero network calls, calibrated from real RRF scores observed in increment 3 (~0.15-0.83 for genuine matches) rather than a guess. Provider routing is a plain ordered list + retry-once-then-fallback, not a class hierarchy — per-provider budget tracking is future work if this needs to get smarter than a v0.
-29. **Spec concern: the spec's named reranker (`BAAI/bge-reranker-base`) measured at ~2GB to load — swapped for a lighter cross-encoder the spec's own "or similar" wording covers, real numbers first, same treatment as the Groq swap (#28).** Before writing any rerank code, measured resident memory (`resource.getrusage().ru_maxrss`, same method as #23/#26), standalone, nothing wired in: bare interpreter → `+import fastembed.rerank` → `+model load` → `+one rerank call, 40 documents`. `BAAI/bge-reranker-base`: 77.5MB → **2119.2MB** just to load (~2041MB delta) — more than double the worker's entire 1GB budget, ~4x the API's (pre-bump). Not viable in either process without a bump far larger than anything else in this project, so not pursued. Measured two lighter FastEmbed cross-encoders instead: `Xenova/ms-marco-MiniLM-L-6-v2` (0.08GB on-disk) — 77.1MB → 296.0MB on load, → 357.0MB after one 40-document rerank call (~280MB total delta); `Xenova/ms-marco-MiniLM-L-12-v2` (0.12GB on-disk) — 76.9MB → 397.4MB on load, → 467.0MB after the same call (~390MB total delta). Went with the L-6 variant: smallest measured footprint that's still a standard, widely-used MS MARCO-trained cross-encoder, not a toy model — stays in FastEmbed/ONNX, no new ML framework (decision #23's reasoning). `RERANK_MODEL` in `gold/rerank.py` is a single named constant, same swap-in-one-line pattern as `GROQ_MODEL`. Runs in the API process, not the worker: reranking is part of `/qa`'s synchronous, request-time path (`answer_question()`), a different code path from the worker's async, ingestion-time `chunk_and_embed` — moving it to the worker would require a new synchronous cross-process call that doesn't exist today, a bigger architectural change than "load a model somewhere with more RAM," and wasn't warranted by the measurement. `filingsage-api`'s `fly.toml` bumped 512mb → 1gb (matching the worker outright, given this process now also runs two ONNX models concurrently — the same shape of load the worker was originally sized for) rather than a second small incremental bump. `RERANK_SCORE_FLOOR` is defined but deliberately NOT wired into an active gate yet — unlike `SCORE_FLOOR`, there's no real production rerank-score distribution to calibrate against, and the raw cross-encoder output is an unbounded logit (not a normalized fused score), so a naive threshold risks rejecting everything or nothing. Revisit once `/qa` has run rerank in production for a while.
+**Recover from data loss** (rebuilds anything whose local files are gone, from EDGAR):
+
+```bash
+python -m filingsage.cli recover-stale --dry-run
+python -m filingsage.cli recover-stale
+```
+
+**Tests:**
+
+```bash
+pytest              # 87 tests; some use testcontainers and need Docker running
+ruff check src tests
+```
+
+---
+
+## Notable technical decisions
+
+Every non-obvious choice here is documented with its reasoning, the alternative rejected, and the threshold at which it'd be revisited. A few of the more interesting ones:
+
+- **DuckDB + Parquet over Spark/Iceberg** — data volume is single-digit GB. A distributed engine solves a problem this project doesn't have.
+- **FastEmbed/ONNX over a PyTorch stack** — the original plan assumed a 24GB VM that never materialized. ONNX models fit a 1GB box where PyTorch wouldn't.
+- **Hand-rolled rate limiter over `tenacity`** — ~25 lines, fully explainable, with SEC-specific behavior (403 as throttle signal, `Retry-After` honored, jitter).
+- **Both spec-named models were swapped after verification, not assumption** — Groq's `llama-3.3-70b-versatile` had been deprecated; `bge-reranker-base` measured at ~2GB to load, over twice the available budget. Both replacements were checked against real docs and real memory numbers first.
+- **Measured before fixing, and the intuitive fix was wrong** — an OOM looked like "two models resident at once." Measuring showed the sparse model costs 0.2MB; FastEmbed's BM25 isn't a neural model at all. The obvious fix would have saved nothing.
+- **A rate limiter that didn't limit anything** — forging `X-Forwarded-For` against the live deployment showed Fly *prepends* rather than replaces, making the limit bypassable by anyone setting a header. `Fly-Client-IP` proved unspoofable under the same test.
+
+📄 **[Full decision log →](docs/DECISIONS.md)** — all 29 entries, including the production incidents and what they cost to learn.
+
+---
 
 ## Honesty
 
-Throughput and latency claims on this page come from load tests committed to this repo, with the test configuration linked. User counts are real registered users. Roadmap features are labeled roadmap — here and in interviews.
+Roadmap features are labeled roadmap — here and in interviews. Every measurement quoted in this repo was taken with the method named alongside it, and several of those measurements overturned the hypothesis that prompted them; those reversals are recorded rather than quietly dropped.
+
+---
+
+*Built by [Arya Doshi](https://github.com/aryadoshii). Full design document: [`docs/filingsage-spec.md`](docs/filingsage-spec.md).*
