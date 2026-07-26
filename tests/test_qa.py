@@ -92,6 +92,52 @@ def test_normal_path_parses_answer_and_drops_hallucinated_citations(monkeypatch)
     assert answer.claims[0].chunk_ids == [1]
 
 
+def test_rerank_is_called_and_determines_what_reaches_the_llm_prompt(monkeypatch):
+    """Proves the wiring, not just that rerank() itself works (test_rerank.py
+    covers that): answer_question() must call rerank() with the real
+    search() results and LLM_CONTEXT_TOP_N, and the LLM prompt must reflect
+    rerank's OUTPUT, not the raw search() order — a chunk search() returned
+    but rerank() dropped must never reach the prompt.
+    """
+    excluded = _result(1, 0.9)  # ranks first by fusion score...
+    kept = _result(2, 0.5)  # ...but rerank() below "promotes" this one instead
+    monkeypatch.setattr(qa, "search", lambda *a, **k: [excluded, kept])
+
+    rerank_calls = []
+
+    def fake_rerank(query, chunks, *, top_k):
+        rerank_calls.append((query, chunks, top_k))
+        return [kept]  # only the "promoted" chunk survives reranking
+
+    monkeypatch.setattr(qa, "rerank", fake_rerank)
+
+    captured_prompts = []
+
+    def capturing_groq(prompt):
+        captured_prompts.append(prompt)
+        return json.dumps({
+            "answer": "Answer grounded in the reranked chunk.",
+            "claims": [{"text": "A claim.", "chunk_ids": [2]}],
+            "confidence": "high",
+            "insufficient_evidence": False,
+        })
+
+    monkeypatch.setattr(qa, "_call_groq", capturing_groq)
+
+    answer = qa.answer_question("What are the risks?")
+
+    assert len(rerank_calls) == 1
+    called_query, called_chunks, called_top_k = rerank_calls[0]
+    assert called_query == "What are the risks?"
+    assert called_chunks == [excluded, kept]
+    assert called_top_k == qa.LLM_CONTEXT_TOP_N
+
+    assert len(captured_prompts) == 1
+    assert f"chunk_id={kept.chunk_id}" in captured_prompts[0]
+    assert f"chunk_id={excluded.chunk_id}" not in captured_prompts[0]
+    assert answer.claims[0].chunk_ids == [2]
+
+
 def test_malformed_json_retries_then_falls_through_to_insufficient_evidence(monkeypatch):
     monkeypatch.setattr(qa, "search", lambda *a, **k: [_result(1, 0.8)])
     calls = {"groq": 0, "gemini": 0}

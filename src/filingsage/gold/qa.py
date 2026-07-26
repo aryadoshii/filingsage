@@ -1,12 +1,11 @@
 """Cited Q&A over embedded filing chunks — spec §6 step 4, straight RAG.
 
 Spec line 217: "cited Q&A endpoint v0 (no agents yet — straight RAG)". This
-builds directly on gold/retrieval.py's search() — retrieval proved itself
-standalone in increment 3, so this is the thin generation layer on top of
-it, not a rewrite. Rerank (spec step 3) and the full NLI verification layer
-(step 5) are deferred (README → Technical Decisions #24); this goes
-retrieval -> generate directly, with a score-floor check standing in for
-the eventual reranker's floor.
+builds directly on gold/retrieval.py's search() and gold/rerank.py's
+rerank() — retrieval proved itself standalone in increment 3, so this is
+the thin generation layer on top of it, not a rewrite. The full NLI
+verification layer (spec step 5) is still deferred (README → Technical
+Decisions #24).
 
 "Never bluff" is the core guarantee: if retrieval didn't find anything
 worth answering from, we say so WITHOUT calling an LLM at all (cheap, fast,
@@ -31,6 +30,7 @@ from filingsage.config import get_settings
 from filingsage.db.models import Chunk as ChunkRow
 from filingsage.db.models import Company, Filing
 from filingsage.db.session import session_scope
+from filingsage.gold.rerank import rerank
 from filingsage.gold.retrieval import SearchResult, search
 
 logger = logging.getLogger(__name__)
@@ -52,21 +52,23 @@ GEMINI_MODEL = "gemini-3.5-flash"
 
 # Retrieval still pulls the spec's full top-40 (search()'s own default), so
 # filter/scope behavior stays exactly as specced — but only this many
-# chunks actually go into the LLM prompt. Stand-in for the eventual
-# reranker's top-8 cut (spec step 3, deferred per decision #24); dumping 40
+# chunks, AFTER reranking, actually go into the LLM prompt. Dumping 40
 # chunks into one prompt would blow past useful relevance long before it
 # blows past token limits.
 LLM_CONTEXT_TOP_N = 8
 
 # "Never bluff" gate: if the top hybrid-fused result scores below this,
-# treat it as "nothing relevant indexed" and skip the LLM call entirely.
-# Placeholder for the real reranker score floor (spec line 112) — picked
-# from real production RRF scores observed in increment 3's manual
-# eyeballing (roughly 0.15-0.83 for genuinely relevant top hits). Set well
-# below that range's low end so a modest-but-real match isn't mistaken for
-# "no evidence," while still catching queries that matched nothing
-# meaningful. Trivially tunable; revisit once rerank gives an actual
-# relevance signal to calibrate against instead of an eyeballed range.
+# treat it as "nothing relevant indexed" and skip the LLM call (and the
+# rerank call) entirely. Runs on the RAW fusion score, BEFORE reranking —
+# deliberately, on two grounds: (1) it's already calibrated from real
+# production RRF scores (increment 3's manual eyeballing, roughly 0.15-0.83
+# for genuinely relevant top hits), while gold/rerank.py's own
+# RERANK_SCORE_FLOOR is an uncalibrated placeholder with no production
+# distribution behind it yet — gating on the trusted signal first is more
+# honest than gating on the untrusted one. (2) It's cheap; reranking loads
+# and runs a ~280MB cross-encoder, so filtering obviously-irrelevant
+# queries out before paying that cost (rather than after) is the right
+# order regardless of calibration. Trivially tunable.
 SCORE_FLOOR = 0.1
 
 _INSUFFICIENT_EVIDENCE_MESSAGE = (
@@ -258,7 +260,7 @@ def answer_question(
     if not results or results[0].fusion_score < SCORE_FLOOR:
         return _insufficient_evidence()
 
-    context_results = results[:LLM_CONTEXT_TOP_N]
+    context_results = rerank(query, results, top_k=LLM_CONTEXT_TOP_N)
     valid_chunk_ids = {r.chunk_id for r in context_results}
 
     raw_answer = _generate(_build_prompt(query, context_results))

@@ -36,17 +36,20 @@ primary_region = "bom"
     timeout = "5s"
     grace_period = "10s"
 
-# Bumped from the free-tier default 256mb after a real OOM kill: `/qa`
-# calling answer_question() loads FastEmbed's dense model (BGE-small,
-# ~230MB resident on top of this process's own ~150MB+ import baseline —
-# same model the worker needed 1GB for, decision #26) to embed the query
-# text, in-process, on every request. `fly logs --no-tail` showed
-# `Out of memory: Killed process ... (uvicorn)` the first time /qa actually
-# ran end-to-end in production. 512mb, not the worker's 1GB: this process
-# embeds ONE short query string per request, not a whole filing's worth of
-# chunks — no EMBED_BATCH_SIZE-style batching concern here, so less
-# headroom is needed. Revisit (with real fly logs evidence, not a guess) if
-# OOM kills recur here.
+# Bumped again, 512mb -> 1gb (now matching the worker), for the reranker
+# (README → Technical Decisions #29): /qa's answer_question() now also
+# loads a cross-encoder (Xenova/ms-marco-MiniLM-L-6-v2, measured ~280MB —
+# model load plus one rerank call, gold/rerank.py) in-process, on top of
+# the dense query-embedding model this process already loads (the ~230MB
+# that justified the previous 256mb -> 512mb bump). Matching the worker's
+# 1gb outright rather than incrementally re-bumping a second time: this
+# process now also runs two ONNX models concurrently resident, the same
+# shape of workload the worker was originally sized for.
+#
+# IMPORTANT: this file is the source of truth applied on every `fly
+# deploy` — a memory bump made via `fly scale` outside of a deploy gets
+# silently reset to whatever's committed here the next time someone
+# deploys (this happened once already on the worker app — decision #26).
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "512mb"
+  memory = "1gb"

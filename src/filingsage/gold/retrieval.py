@@ -54,6 +54,12 @@ class SearchResult:
     # carries the single RRF score, not each prefetch's contribution —
     # querying each prefetch again separately just for debug numbers would
     # double the Qdrant calls per search, so this is the one score we have.
+    rerank_score: float | None = None
+    # None until gold/rerank.py's rerank() rescores this result — search()
+    # itself never sets this. A frozen dataclass field, not a second type,
+    # so the retrieve -> rerank pipeline is a list[SearchResult] ->
+    # list[SearchResult] transform (dataclasses.replace()) rather than
+    # converting between two near-identical shapes at the rerank boundary.
 
 
 def _build_filter(
