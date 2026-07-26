@@ -82,6 +82,31 @@ def test_answer_question_raising_returns_clean_503(monkeypatch):
     assert resp.json() == {"detail": "Q&A is temporarily unavailable"}
 
 
+def test_rate_limiter_raising_returns_clean_503(monkeypatch):
+    """Regression test for a real production bug: check_rate_limit() used
+    to be called OUTSIDE the route's try/except entirely, so its own
+    failure (e.g. a Redis connection/config error) bypassed all error
+    handling and surfaced as a raw, unhandled 500 instead of the same clean
+    503 answer_question() failures get. Mirrors
+    test_answer_question_raising_returns_clean_503 above, but for the rate
+    limiter's own failure path.
+    """
+    def raising(ip):
+        raise RuntimeError("simulated Redis TLS misconfiguration with a sensitive internal detail")
+
+    monkeypatch.setattr(main, "check_rate_limit", raising)
+    monkeypatch.setattr(main, "answer_question", lambda *a, **k: _ANSWER)
+
+    resp = client.post("/qa", json={"question": "What are the risks?"})
+
+    assert resp.status_code == 503
+    body_text = resp.text
+    assert "simulated Redis TLS" not in body_text
+    assert "RuntimeError" not in body_text
+    assert "Traceback" not in body_text
+    assert resp.json() == {"detail": "Q&A is temporarily unavailable"}
+
+
 @pytest.mark.integration
 def test_rate_limit_returns_429_after_max_requests(monkeypatch):
     monkeypatch.setattr(main, "answer_question", lambda *a, **k: _ANSWER)

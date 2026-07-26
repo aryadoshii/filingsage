@@ -141,8 +141,24 @@ def ask_question(body: QARequest, request: Request) -> Answer:
     the only protection is the per-IP rate limit below, plus a startup-time
     warning log (this module's lifespan handler) so the gap stays visible
     in `fly logs`, not forgotten.
+
+    check_rate_limit() itself is wrapped in its own try/except, separate
+    from answer_question()'s below — a production bug showed this endpoint
+    returning a raw 500 (not the clean 503 below) because the rate limiter
+    call sat OUTSIDE the try/except entirely, so its own failure (Redis
+    unreachable/misconfigured) bypassed all error handling. FAIL CLOSED
+    here (503, not "skip the check and serve anyway"): this endpoint has no
+    other auth, so the rate limit is the only cap on cost/abuse exposure —
+    serving requests unchecked during exactly the moment that cap breaks is
+    the wrong failure mode for an unauthenticated, LLM-backed endpoint.
     """
-    if not check_rate_limit(_client_ip(request)):
+    try:
+        allowed = check_rate_limit(_client_ip(request))
+    except Exception:
+        logger.exception("qa: rate limiter failed — failing closed (no other auth on this endpoint)")
+        raise HTTPException(status_code=503, detail="Q&A is temporarily unavailable") from None
+
+    if not allowed:
         raise HTTPException(
             status_code=429,
             detail=(

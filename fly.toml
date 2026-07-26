@@ -36,11 +36,17 @@ primary_region = "bom"
     timeout = "5s"
     grace_period = "10s"
 
-# Fly's free-tier default size. Flagging, not changing without asking first:
-# FastAPI + SQLAlchemy + httpx should fit comfortably, but this process also
-# imports pyarrow/duckdb transitively (parsing deps shared across the
-# codebase) which push memory headroom lower than a bare FastAPI app would
-# have. Revisit if we see OOM kills in `fly logs` or `fly status`.
+# Bumped from the free-tier default 256mb after a real OOM kill: `/qa`
+# calling answer_question() loads FastEmbed's dense model (BGE-small,
+# ~230MB resident on top of this process's own ~150MB+ import baseline —
+# same model the worker needed 1GB for, decision #26) to embed the query
+# text, in-process, on every request. `fly logs --no-tail` showed
+# `Out of memory: Killed process ... (uvicorn)` the first time /qa actually
+# ran end-to-end in production. 512mb, not the worker's 1GB: this process
+# embeds ONE short query string per request, not a whole filing's worth of
+# chunks — no EMBED_BATCH_SIZE-style batching concern here, so less
+# headroom is needed. Revisit (with real fly logs evidence, not a guess) if
+# OOM kills recur here.
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "256mb"
+  memory = "512mb"

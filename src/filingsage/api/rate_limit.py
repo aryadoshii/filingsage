@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 from functools import lru_cache
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from redis import Redis
 
@@ -31,7 +32,36 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 
 @lru_cache(maxsize=1)
 def _redis_client() -> Redis:
-    return Redis.from_url(get_settings().redis_url)
+    """Production bug, fixed here: REDIS_URL's `?ssl_cert_reqs=CERT_REQUIRED`
+    query param works for Celery/kombu's redis transport, but NOT for a
+    direct redis-py `Redis.from_url()` call like this one — confirmed by
+    reading redis-py's own source (redis.connection.parse_url /
+    SSLConnection.__init__): `ssl_cert_reqs` isn't in
+    URL_QUERY_ARGUMENT_PARSERS, so the literal query-string value is passed
+    straight through, and SSLConnection only accepts the lowercase strings
+    "none"/"optional"/"required" — "CERT_REQUIRED" isn't one of them, and
+    redis-py raises exactly the `RedisError: Invalid SSL Certificate
+    Requirements Flag: CERT_REQUIRED` seen in production the moment this
+    endpoint took its first real request.
+
+    Can't just pass the correct value as a kwarg alongside the URL either:
+    `ConnectionPool.from_url()` documents that "querystring arguments
+    always win" over conflicting kwargs, specifically so a URL's own
+    settings can't be silently overridden — so the bad query param has to
+    be stripped from the URL before redis-py ever parses it. REDIS_URL
+    itself is left untouched (it's shared with Celery's broker connection,
+    which does handle "CERT_REQUIRED" correctly) — only this module's own
+    parsing of it changes.
+    """
+    url = get_settings().redis_url
+    parsed = urlparse(url)
+    kwargs: dict[str, str] = {}
+    if parsed.scheme == "rediss":
+        query = parse_qs(parsed.query)
+        query.pop("ssl_cert_reqs", None)
+        parsed = parsed._replace(query=urlencode(query, doseq=True))
+        kwargs["ssl_cert_reqs"] = "required"
+    return Redis.from_url(urlunparse(parsed), **kwargs)
 
 
 def check_rate_limit(client_ip: str, *, redis_client: Redis | None = None) -> bool:
