@@ -9,6 +9,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from filingsage import __version__
+from filingsage.api.catalog import router as catalog_router
 from filingsage.api.rate_limit import (
     RATE_LIMIT_MAX_REQUESTS,
     RATE_LIMIT_WINDOW_SECONDS,
@@ -62,6 +63,7 @@ app = FastAPI(
     ),
     lifespan=lifespan,
 )
+app.include_router(catalog_router)
 
 
 @app.get("/healthz", tags=["ops"])
