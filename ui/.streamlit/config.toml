@@ -1,0 +1,29 @@
+[server]
+headless = true
+# Re-run the app when a file under ui/ changes (bind-mounted in Compose).
+runOnSave = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+# Visual identity: an annotated filing. White paper, ink text, EDGAR-blue for
+# actions, and a highlighter yellow reserved for one thing only — the exact
+# filing text an answer cites (see app.py's stylesheet).
+[theme]
+base = "light"
+primaryColor = "#1F4E79"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F4F7"
+textColor = "#1B2230"
+linkColor = "#1F4E79"
+borderColor = "#DDE2E9"
+font = "IBM Plex Sans:https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap, sans-serif"
+headingFont = "Source Serif 4:https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap, serif"
+headingFontWeights = [600, 600, 500]
+baseRadius = "6px"
+greenColor = "#2F7D57"
+orangeColor = "#A86B12"
+redColor = "#B23B3B"

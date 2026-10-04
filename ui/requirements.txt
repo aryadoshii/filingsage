@@ -1,0 +1,10 @@
+# The dashboard's whole dependency tree — deliberately separate from the
+# backend's pyproject.toml so this image never pulls in fastembed/onnxruntime/
+# qdrant-client and the backend image never pulls in Streamlit.
+#
+# streamlit: the UI framework (decision #32). Pinned to a minor version
+#   because .streamlit/config.toml uses theme keys that change between minors.
+# httpx: the dashboard is an HTTP client of the API; already the backend's
+#   HTTP library, so it's one library across both codebases.
+streamlit==1.65.*
+httpx>=0.27

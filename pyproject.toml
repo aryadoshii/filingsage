@@ -60,7 +60,7 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 100
-src = ["src", "tests"]
+src = ["src", "tests", "ui"]
 
 [tool.ruff.lint]
 # Pinned explicitly: with no `select`, the rule set silently changes whenever
@@ -71,6 +71,9 @@ select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# ui/ is a separate app (its own image and requirements), not part of the
+# installed package; this lets tests import its framework-free modules.
+pythonpath = ["ui"]
 markers = ["integration: requires a running Docker daemon (testcontainers)"]
 filterwarnings = [
     # Tests use qdrant-client's in-memory local mode, which accepts
