@@ -15,7 +15,8 @@ from datetime import date, datetime
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from filingsage.db.models import Chunk, Company, Event, Filing, FilingStatus
+from filingsage.connectors import edgar_items
+from filingsage.db.models import Chunk, Company, Event, Filing, FilingStatus, FinancialFact
 
 EDGAR_ARCHIVES = "https://www.sec.gov/Archives/edgar/data"
 
@@ -224,3 +225,90 @@ def get_citations(session: Session, chunk_ids: list[int]) -> list[CitationRow]:
         )
         for row in rows
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class CompanyDetail:
+    ticker: str
+    name: str
+    cik: int
+    sector: str | None
+    fiscal_year_end: str | None
+    exchange: str | None
+    filings: int
+    embedded: int
+    latest_filed_at: date | None
+    financials_updated_at: datetime | None
+
+
+def company_detail(session: Session, ticker: str) -> CompanyDetail | None:
+    company = session.scalar(select(Company).where(Company.ticker == ticker.upper()))
+    if company is None:
+        return None
+    filings, embedded, latest = session.execute(
+        select(
+            func.count(Filing.id),
+            func.count(case((Filing.status == FilingStatus.EMBEDDED.value, 1))),
+            func.max(Filing.filed_at),
+        ).where(Filing.cik == company.cik)
+    ).one()
+    return CompanyDetail(
+        ticker=company.ticker, name=company.name, cik=company.cik, sector=company.sector,
+        fiscal_year_end=company.fiscal_year_end, exchange=company.exchange,
+        filings=filings, embedded=embedded, latest_filed_at=latest,
+        financials_updated_at=company.financials_updated_at,
+    )
+
+
+def company_facts(session: Session, cik: int) -> list[FinancialFact]:
+    return list(session.scalars(select(FinancialFact).where(FinancialFact.cik == cik)))
+
+
+def facts_by_cik(session: Session) -> dict[int, list[FinancialFact]]:
+    grouped: dict[int, list[FinancialFact]] = {}
+    for fact in session.scalars(select(FinancialFact)):
+        grouped.setdefault(fact.cik, []).append(fact)
+    return grouped
+
+
+@dataclass(frozen=True, slots=True)
+class EventRowOut:
+    filed_at: date
+    accession_no: str
+    form_type: str
+    item_codes: list[str]
+    events: list[str]
+    notable: bool
+    status: str
+    edgar_url: str
+
+
+def company_events(session: Session, cik: int, *, limit: int = 30) -> list[EventRowOut]:
+    """The company's 8-Ks, newest first, as plain-language events."""
+    rows = session.scalars(
+        select(Filing)
+        .where(Filing.cik == cik, Filing.form_type.in_(("8-K", "8-K/A")))
+        .order_by(Filing.filed_at.desc(), Filing.id.desc())
+        .limit(limit)
+    ).all()
+    out = []
+    for f in rows:
+        codes = edgar_items.parse_items(f.items)
+        infos = edgar_items.describe(codes) if codes else []
+        out.append(
+            EventRowOut(
+                filed_at=f.filed_at,
+                accession_no=f.accession_no,
+                form_type=f.form_type,
+                item_codes=codes,
+                events=[i.label for i in infos] or ["Current report"],
+                notable=any(i.notable for i in infos),
+                status=f.status,
+                edgar_url=edgar_document_url(f.cik, f.accession_no, f.primary_document),
+            )
+        )
+    return out
+
+
+def sectors_by_cik(session: Session) -> dict[int, str | None]:
+    return dict(session.execute(select(Company.cik, Company.sector)).all())

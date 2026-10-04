@@ -1,5 +1,6 @@
 """Read-only endpoints for the dashboard: companies, filings, pipeline stats,
-recent events, and citation lookups.
+recent events, citation lookups, and company research pages (financials,
+key stats, 8-K events).
 
 Thin by design — each route opens a session, calls one function from
 db/queries.py, and shapes the result. No auth yet, same as /qa (real JWT
@@ -12,12 +13,14 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import date, datetime
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from filingsage.db import queries
 from filingsage.db.session import session_scope
+from filingsage.financials import report
 
 router = APIRouter(tags=["catalog"])
 
@@ -120,3 +123,140 @@ def get_citations(ids: str = Query(description="Comma-separated chunk ids, e.g. 
         raise HTTPException(status_code=422, detail=f"at most {MAX_CITATION_IDS} ids per request")
     with session_scope() as session:
         return [CitationOut(**asdict(row)) for row in queries.get_citations(session, chunk_ids)]
+
+
+# --- Company research pages ---------------------------------------------------
+
+
+class KeyStatOut(BaseModel):
+    key: str
+    value: float | None
+    as_of: date | None
+
+
+class CompanyDetailOut(BaseModel):
+    ticker: str
+    name: str
+    cik: int
+    sector: str | None
+    fiscal_year_end: str | None
+    exchange: str | None
+    filings: int
+    embedded: int
+    latest_filed_at: date | None
+    financials_updated_at: datetime | None
+    key_stats: list[KeyStatOut]
+
+
+class StatementColumnOut(BaseModel):
+    start: date | None
+    end: date
+    values: dict[str, float | None]
+    derived: list[str]
+
+
+class StatementOut(BaseModel):
+    period: Literal["quarter", "annual"]
+    columns: list[StatementColumnOut]
+
+
+class CompanyEventOut(BaseModel):
+    filed_at: date
+    accession_no: str
+    form_type: str
+    item_codes: list[str]
+    events: list[str]
+    notable: bool
+    status: str
+    edgar_url: str
+
+
+class OverviewRowOut(BaseModel):
+    ticker: str
+    name: str
+    sector: str | None
+    filings: int
+    embedded: int
+    latest_filed_at: date | None
+    revenue_ttm: float | None
+    revenue_growth_yoy: float | None
+    net_margin_ttm: float | None
+    as_of: date | None
+
+
+def _detail_or_404(session, ticker: str) -> queries.CompanyDetail:
+    detail = queries.company_detail(session, ticker)
+    if detail is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{ticker.upper()} isn't tracked yet. Add it from the Filings page.",
+        )
+    return detail
+
+
+@router.get("/overview")
+def get_overview() -> list[OverviewRowOut]:
+    """Every tracked company with its headline numbers — the market-overview
+    grid. One facts query for all companies, not one per company."""
+    with session_scope() as session:
+        companies = queries.list_companies(session)
+        facts = queries.facts_by_cik(session)
+        sectors = queries.sectors_by_cik(session)
+        rows = []
+        for c in companies:
+            stats = {s.key: s for s in report.key_stats(facts.get(c.cik, []))}
+            rows.append(OverviewRowOut(
+                ticker=c.ticker, name=c.name, sector=sectors.get(c.cik),
+                filings=c.filings, embedded=c.embedded, latest_filed_at=c.latest_filed_at,
+                revenue_ttm=stats["revenue_ttm"].value,
+                revenue_growth_yoy=stats["revenue_growth_yoy"].value,
+                net_margin_ttm=stats["net_margin_ttm"].value,
+                as_of=stats["revenue_ttm"].as_of,
+            ))
+        return rows
+
+
+@router.get("/companies/{ticker}")
+def get_company(ticker: str) -> CompanyDetailOut:
+    with session_scope() as session:
+        detail = _detail_or_404(session, ticker)
+        stats = report.key_stats(queries.company_facts(session, detail.cik))
+        return CompanyDetailOut(
+            **asdict(detail),
+            key_stats=[KeyStatOut(key=s.key, value=s.value, as_of=s.as_of) for s in stats],
+        )
+
+
+@router.get("/companies/{ticker}/financials")
+def get_financials(
+    ticker: str,
+    period: Literal["quarter", "annual"] = "quarter",
+    limit: int = Query(default=8, ge=1, le=20),
+) -> StatementOut:
+    """Income statement, cash flow and balance-sheet lines plus margins and
+    growth, one column per period, oldest first. `derived` lists the values
+    in a column that were computed (e.g. Q4 = full year minus Q1-Q3)."""
+    with session_scope() as session:
+        detail = _detail_or_404(session, ticker)
+        columns = report.statement(
+            queries.company_facts(session, detail.cik), period=period, limit=limit
+        )
+        return StatementOut(
+            period=period,
+            columns=[
+                StatementColumnOut(start=c.start, end=c.end, values=c.values, derived=c.derived)
+                for c in columns
+            ],
+        )
+
+
+@router.get("/companies/{ticker}/events")
+def get_events_for_company(
+    ticker: str, limit: int = Query(default=30, ge=1, le=MAX_LIST_LIMIT)
+) -> list[CompanyEventOut]:
+    with session_scope() as session:
+        detail = _detail_or_404(session, ticker)
+        return [
+            CompanyEventOut(**asdict(e))
+            for e in queries.company_events(session, detail.cik, limit=limit)
+        ]
