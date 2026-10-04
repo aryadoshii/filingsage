@@ -21,3 +21,5 @@ frontend
 # Secrets never enter an image layer. Compose reads env_file on the host.
 .env
 .env.*
+scripts
+Makefile
