@@ -149,3 +149,48 @@ def test_unreachable_api_names_the_url_and_the_fix():
 
     with pytest.raises(ApiError, match=r"api\.test.*docker compose ps"):
         _client(handler).health()
+
+
+# --- numbers and statements ------------------------------------------------------
+
+
+def test_money_uses_finance_scales_and_a_real_minus_sign():
+    assert fmt.money(391_035_000_000) == "$391.0B"
+    assert fmt.money(1_234_000_000_000) == "$1.2T"
+    assert fmt.money(512_300_000) == "$512.3M"
+    assert fmt.money(12_345) == "$12,345"
+    assert fmt.money(-2_100_000_000) == "−$2.1B"
+    assert fmt.money(None) == "—"
+
+
+def test_percentages_and_per_share_values():
+    assert fmt.pct(0.2456) == "24.6%"
+    assert fmt.pct(0.12, signed=True) == "+12.0%"
+    assert fmt.pct(-0.041, signed=True) == "−4.1%"
+    assert fmt.per_share(6.4) == "$6.40"
+    assert fmt.per_share(None) == "—"
+
+
+def test_period_labels_use_the_month_the_period_ended():
+    assert fmt.period_label("2025-09-27", "quarter") == "Sep 2025"
+    assert fmt.period_label("2025-09-27", "annual") == "FY Sep 2025"
+
+
+def test_statement_csv_has_raw_numbers_and_skips_section_headings():
+    columns = [
+        {"end": "2025-06-28", "values": {"revenue": 120.0, "net_margin": None}, "derived": []},
+        {"end": "2025-09-27", "values": {"revenue": 136.0, "net_margin": 0.2}, "derived": []},
+    ]
+    lines = fmt.statement_csv(columns, "quarter").splitlines()
+
+    assert lines[0] == "metric,Jun 2025,Sep 2025"
+    assert "Revenue,120.0,136.0" in lines
+    assert "Net margin,,0.2" in lines  # missing value is blank, not zero
+    assert not any(line.startswith("Income statement") for line in lines)
+
+
+def test_recent_filings_are_flagged_for_a_week():
+    from datetime import date
+    assert fmt.is_recent("2026-10-01", today=date(2026, 10, 4))
+    assert not fmt.is_recent("2026-09-20", today=date(2026, 10, 4))
+    assert not fmt.is_recent(None)

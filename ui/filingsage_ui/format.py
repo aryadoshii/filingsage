@@ -156,3 +156,108 @@ def event_detail(event: dict) -> str:
         form = payload.get("form_type")
         return f"{payload['ticker']} {form}" if form else payload["ticker"]
     return ""
+
+
+# --- numbers -------------------------------------------------------------------
+
+MINUS = "−"  # a real minus sign, not a hyphen: aligns with digits
+
+
+def money(value: float | None, *, decimals: int = 1) -> str:
+    """$391.0B / $512.3M / $12,345 — the scale a finance reader expects."""
+    if value is None:
+        return "—"
+    sign = MINUS if value < 0 else ""
+    v = abs(value)
+    for threshold, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+        if v >= threshold:
+            return f"{sign}${v / threshold:,.{decimals}f}{suffix}"
+    return f"{sign}${v:,.0f}"
+
+
+def pct(value: float | None, *, signed: bool = False, decimals: int = 1) -> str:
+    if value is None:
+        return "—"
+    text = f"{abs(value) * 100:.{decimals}f}%"
+    if value < 0:
+        return MINUS + text
+    return ("+" + text) if signed and value > 0 else text
+
+
+def per_share(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{MINUS if value < 0 else ''}${abs(value):,.2f}"
+
+
+FORMATTERS = {"money": money, "pct": pct, "eps": per_share}
+
+
+def period_label(end: str, period: str) -> str:
+    """Column header for a statement period: 'Sep 2025' or 'FY Sep 2025'.
+    Calendar labels on purpose: fiscal quarter names differ by company
+    (Apple's fiscal Q1 ends in December), period-end months don't."""
+    d = date.fromisoformat(end)
+    label = d.strftime("%b %Y")
+    return f"FY {label}" if period == "annual" else label
+
+
+# Statement layout: (metric, label, format), with section headings as
+# (None, heading, None). Order follows a standard 10-K presentation.
+STATEMENT_ROWS: list[tuple[str | None, str, str | None]] = [
+    (None, "Income statement", None),
+    ("revenue", "Revenue", "money"),
+    ("revenue_growth", "Revenue growth, year over year", "pct"),
+    ("gross_profit", "Gross profit", "money"),
+    ("gross_margin", "Gross margin", "pct"),
+    ("operating_income", "Operating income", "money"),
+    ("operating_margin", "Operating margin", "pct"),
+    ("net_income", "Net income", "money"),
+    ("net_margin", "Net margin", "pct"),
+    ("eps_diluted", "Earnings per share (diluted)", "eps"),
+    (None, "Cash flow", None),
+    ("operating_cash_flow", "Operating cash flow", "money"),
+    ("capex", "Capital expenditures", "money"),
+    ("free_cash_flow", "Free cash flow", "money"),
+    (None, "Balance sheet", None),
+    ("cash", "Cash and equivalents", "money"),
+    ("total_assets", "Total assets", "money"),
+    ("total_liabilities", "Total liabilities", "money"),
+    ("equity", "Shareholders' equity", "money"),
+    ("long_term_debt", "Long-term debt", "money"),
+]
+
+KEY_STAT_LABELS: dict[str, tuple[str, str]] = {
+    "revenue_ttm": ("Revenue, last 12 months", "money"),
+    "net_income_ttm": ("Net income, last 12 months", "money"),
+    "net_margin_ttm": ("Net margin, last 12 months", "pct"),
+    "free_cash_flow_ttm": ("Free cash flow, last 12 months", "money"),
+    "eps_diluted_fy": ("EPS (diluted), last fiscal year", "eps"),
+    "cash": ("Cash and equivalents", "money"),
+    "long_term_debt": ("Long-term debt", "money"),
+    "revenue_growth_yoy": ("Revenue growth, latest quarter", "pct"),
+}
+
+
+def statement_csv(columns: list[dict], period: str) -> str:
+    """The statement as CSV with raw numbers (not display strings), one row
+    per metric — what someone downloading it wants to put in a spreadsheet."""
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["metric", *[period_label(c["end"], period) for c in columns]])
+    for metric, label, kind in STATEMENT_ROWS:
+        if metric is None:
+            continue
+        writer.writerow([label, *[
+            "" if c["values"].get(metric) is None else c["values"][metric] for c in columns
+        ]])
+    return buf.getvalue()
+
+
+def is_recent(filed_at: str | None, *, days: int = 7, today: date | None = None) -> bool:
+    if not filed_at:
+        return False
+    return ((today or date.today()) - date.fromisoformat(filed_at)).days <= days

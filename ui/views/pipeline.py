@@ -7,12 +7,13 @@ import streamlit as st
 
 from filingsage_ui import format as fmt
 from filingsage_ui.api import ApiError
-from filingsage_ui.components import client, page_header, show_api_error
+from filingsage_ui.components import client, masthead, show_api_error
 
-page_header(
+masthead(
     "Pipeline",
     "How FilingSage turns filings into searchable passages: found on EDGAR, downloaded, "
     "split into sections, then indexed. This page refreshes every five seconds.",
+    eyebrow="System status",
 )
 
 

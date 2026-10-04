@@ -6,17 +6,18 @@ import streamlit as st
 
 from filingsage_ui import format as fmt
 from filingsage_ui.api import ApiError
-from filingsage_ui.components import cached_companies, client, page_header, show_api_error
+from filingsage_ui.components import cached_companies, client, masthead, show_api_error
 
 FORMS = ["All forms", "10-K", "10-Q", "8-K"]
 STATUS_FILTERS = {"Any status": None} | {
     label: status for status, (label, _tone) in fmt.STATUS_LABELS.items()
 }
 
-page_header(
+masthead(
     "Filings",
     "Every 10-K, 10-Q and 8-K FilingSage has found for the companies it tracks. New filings "
     "are picked up automatically every two hours.",
+    eyebrow="Coverage",
 )
 
 with st.expander("Track a company", icon=":material/add:", expanded=False):

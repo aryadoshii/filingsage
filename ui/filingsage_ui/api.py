@@ -99,6 +99,20 @@ class FilingSageClient:
     def events(self, *, limit: int = 25) -> list[dict]:
         return self._request("GET", "/events", params={"limit": limit})
 
+    def overview(self) -> list[dict]:
+        return self._request("GET", "/overview")
+
+    def company(self, ticker: str) -> dict:
+        return self._request("GET", f"/companies/{ticker}")
+
+    def financials(self, ticker: str, *, period: str = "quarter", limit: int = 8) -> dict:
+        return self._request(
+            "GET", f"/companies/{ticker}/financials", params={"period": period, "limit": limit}
+        )
+
+    def company_events(self, ticker: str, *, limit: int = 30) -> list[dict]:
+        return self._request("GET", f"/companies/{ticker}/events", params={"limit": limit})
+
     def citations(self, chunk_ids: list[int]) -> list[dict]:
         if not chunk_ids:
             return []
