@@ -151,7 +151,7 @@ def split_sections(lines: list[str], form_type: str) -> list[Section]:
             body_start += 1
 
         end = markers[idx + 1][0] if idx + 1 < len(markers) else len(lines)
-        body = "\n".join(l for l in lines[body_start:end] if l.strip())
+        body = "\n".join(line for line in lines[body_start:end] if line.strip())
 
         sections.append(
             Section(key=key, item_no=item_no.upper(), heading=heading, text=body)

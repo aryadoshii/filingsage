@@ -12,10 +12,10 @@ from datetime import date, datetime
 from sqlalchemy import (
     JSON,
     BigInteger,
-    Integer,
     Date,
     DateTime,
     ForeignKey,
+    Integer,
     String,
     Text,
     UniqueConstraint,
