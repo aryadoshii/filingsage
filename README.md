@@ -28,9 +28,10 @@ Point it at a list of tickers. It discovers every new 10-K, 10-Q, and 8-K from S
 | LangGraph agent orchestration | 🗺️ Roadmap |
 | Email briefs on new filings | 🗺️ Roadmap |
 | JWT auth + per-user quotas | 🗺️ Roadmap |
-| Web frontend | 🗺️ Roadmap |
+| Web dashboard — ask with highlighted sources, track companies, live pipeline view | ✅ Shipped (Streamlit) |
+| Production web frontend (Next.js) | 🗺️ Roadmap |
 
-**Scale so far:** ~1,000 filings discovered across a 10-ticker watchlist · 94 tests.
+**Scale so far:** ~1,000 filings discovered across a 10-ticker watchlist · 125 tests.
 
 ---
 
@@ -130,6 +131,7 @@ flowchart TB
 
 | Layer | Choice |
 | --- | --- |
+| Dashboard | Streamlit (HTTP client of the API) |
 | API | FastAPI · Uvicorn |
 | Async pipeline | Celery (worker + beat) · Redis |
 | Database | Postgres 16 · SQLAlchemy · Alembic |
@@ -155,13 +157,18 @@ cp .env.example .env
 # Required: SEC_CONTACT_EMAIL (SEC fair-access policy mandates a real contact)
 # For Q&A: GROQ_API_KEY and/or GEMINI_API_KEY (both have free tiers)
 
-docker compose up --build -d     # migrate, api, worker, beat, postgres, redis, qdrant
+# For the dashboard's "Track a company" form: a shared secret for the ingest endpoint
+echo "INGEST_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" >> .env
+
+docker compose up --build -d     # migrate, api, worker, beat, ui, postgres, redis, qdrant
 docker compose ps                # services "healthy"; migrate shows "exited (0)"
 ```
 
+**Open the dashboard at <http://localhost:8501>.** Track a company on the Filings page, watch its filings move through the pipeline on the Pipeline page, then ask questions on the Ask page — every claim links to the highlighted passage it came from and to the filing on sec.gov.
+
 The schema is applied automatically by a one-shot `migrate` service before the API and worker start.
 
-**Ingest, search, ask** — the CLI runs inside the API container, so nothing needs installing on the host:
+**Or from the terminal** — the CLI runs inside the API container, so nothing needs installing on the host:
 
 ```bash
 docker compose exec api python -m filingsage.cli ingest AAPL --limit 5

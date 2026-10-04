@@ -43,12 +43,13 @@ Machine: MacBook Air (Apple Silicon → every Compose image must have an arm64 v
 
 ```
 src/filingsage/
-  api/          FastAPI app (main.py) + Redis rate limiter
+  api/          FastAPI app (main.py), read-only catalog routes, Redis rate limiter
   worker/       Celery app (+ beat schedule), tasks, recovery tool
   connectors/   SourceConnector ABC + EdgarConnector
   parsing/      bronze HTML -> sectioned silver Parquet (+ DQ checks)
   gold/         chunking, embedding, Qdrant store, retrieval, rerank, cited Q&A
   db/           SQLAlchemy models, session, transactional event emitter
+ui/             Streamlit dashboard (own image; HTTP client of the API only)
 migrations/     Alembic
 tests/          pytest (unit; testcontainers for integration)
 docs/           filingsage-spec.md (frozen) · decisions.md (decision log)
@@ -79,6 +80,7 @@ ruff check src tests                     # lint
 
 Phase 0 — local stack
 - [x] L1 — local Qdrant in Compose, auto-migrate service, payload indexes in `ensure_collection()`, Celery beat replaces the GitHub cron, host-facing `.env.example`, `.dockerignore` (decisions #30, #31)
+- [x] L1b — Streamlit dashboard at localhost:8501 (Ask with highlighted sources, Filings + track a company, live Pipeline) on new read-only API endpoints; Docker layer order fixed so code changes keep the baked-model cache (decision #32)
 
 Phase 1 — finish the RAG stack (spec §6)
 - [ ] L2 — NLI claim verification (step 5): per-claim entailment score against cited chunks
@@ -106,4 +108,4 @@ Phase 4 — frontend (Week 5)
 
 **Definition of done (localhost edition):** on a fresh `docker compose up`, a new user signs up at localhost, adds 3 tickers, asks a cited question, receives an email brief in Mailpit when one of their companies files — while Grafana shows it happening.
 
-**Open small items:** `RERANK_SCORE_FLOOR` uncalibrated (needs eval data, L12) · `recover-stale` ignores intact-but-stuck filings · chunking tokenizer downloads from the HF Hub on first use (not baked into the image) · Fly worker machine still exists on the paused hosted deployment.
+**Open small items:** `RERANK_SCORE_FLOOR` uncalibrated (needs eval data, L12) · `recover-stale` ignores intact-but-stuck filings · Fly worker machine still exists on the paused hosted deployment.
