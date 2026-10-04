@@ -2,7 +2,7 @@
 
 FilingSage is an AI research analyst that watches a user's companies, ingests every new SEC filing, and delivers cited briefs and Q&A. It is Arya's flagship portfolio project with three purposes, in order:
 
-1. A **live, deployed SaaS** a stranger can sign up for and use — not a GitHub repo.
+1. A **working product a stranger can sign up for and use** — not a GitHub repo. It runs **fully on localhost** via one `docker compose up` (docs/decisions.md #30): the hosted deployment is paused under a hard zero-spend constraint, and returns only if a free host with enough RAM appears.
 2. **Interview defensibility** — Arya must be able to explain every file, dependency, and architectural decision in detail. Code he can't defend is worthless here.
 3. **Honest engineering** — every metric measured, never invented.
 
@@ -23,57 +23,87 @@ FilingSage is an AI research analyst that watches a user's companies, ingests ev
 3. **Explain as you build.** Per component: 2–5 sentences on what it does, why this design, and what interview question it answers. At milestone completion, quiz Arya with 3–4 interview-style questions and correct his answers.
 4. **Tests are not optional.** Every non-trivial module gets pytest coverage as it's written. Integration tests use testcontainers. Never defer tests.
 5. **Every new dependency needs justification**: what problem it solves, why stdlib or an existing dep can't. Keep the tree lean.
-6. **Maintain the Decisions Log.** Non-obvious choice → append a numbered entry to README → Technical Decisions (rejected alternative + revisit threshold).
+6. **Maintain the Decisions Log.** Non-obvious choice → append a numbered entry to `docs/decisions.md` (rejected alternative + revisit threshold). The README keeps only a short summary.
 7. **SEC EDGAR compliance:** declared `User-Agent` with contact email (`SEC_CONTACT_EMAIL` env var), ≤ 10 req/s, exponential backoff on 403/429. Never scrape anything against ToS.
 8. **Git discipline:** conventional commits, suggest commit points as work lands, feature branches for larger pieces. History should show real iterative development.
 9. **When Arya is stuck or demotivated:** find the smallest next shippable step. Never expand scope. Momentum beats perfection.
 10. **Free tiers drift.** Before depending on an external free service, verify its current terms; propose the closest free alternative if they've changed.
 11. **Git authorship:** commits must be authored solely by Arya. Never add
 Co-Authored-By trailers, AI attribution lines, or any name other than Arya's to commits, PRs, or repository metadata — no exceptions.
+12. **Zero spend.** No paid tiers, no paid infra, no "small" upgrades. Everything must run free on localhost; managed free tiers are optional extras, never requirements.
+13. **Production is hands-off.** Never run migrations against a hosted database or deploy anything on Arya's behalf — he does that manually.
 
 ## Calibrating explanations
 
 Arya is strong in: Python, FastAPI, LangGraph, hybrid RAG (retrieval fusion, cross-encoder reranking, NLI verification), JWT auth, pytest, Docker basics.
 Teach more carefully: Terraform, Prometheus/Grafana/Loki, Celery at scale, Cloudflare Tunnel, Oracle Cloud, CI/CD beyond basics.
-Machine: MacBook Air (Apple Silicon → arm64 images, matching the Oracle ARM VM target).
+Machine: MacBook Air (Apple Silicon → every Compose image must have an arm64 variant).
 
 ## Layout
 
 ```
 src/filingsage/
-  api/          FastAPI app (main.py)
-  worker/       Celery app + tasks
+  api/          FastAPI app (main.py) + Redis rate limiter
+  worker/       Celery app (+ beat schedule), tasks, recovery tool
   connectors/   SourceConnector ABC + EdgarConnector
+  parsing/      bronze HTML -> sectioned silver Parquet (+ DQ checks)
+  gold/         chunking, embedding, Qdrant store, retrieval, rerank, cited Q&A
+  db/           SQLAlchemy models, session, transactional event emitter
+migrations/     Alembic
 tests/          pytest (unit; testcontainers for integration)
-docs/           filingsage-spec.md (frozen)
-data/           local bronze/silver in dev (gitignored; R2 in prod)
+docs/           filingsage-spec.md (frozen) · decisions.md (decision log)
+deploy/         Fly.io configs for the paused hosted deployment
+data/           local bronze/silver (gitignored)
 ```
 
 ## Commands
 
 ```bash
-cp .env.example .env                     # once; set SEC_CONTACT_EMAIL
-docker compose up --build                # full dev stack
-docker compose ps                        # all services should be healthy
+cp .env.example .env                     # once; set SEC_CONTACT_EMAIL (+ GROQ/GEMINI keys for Q&A)
+docker compose up --build -d             # migrate (one-shot), api, worker, beat, postgres, redis, qdrant
+docker compose ps                        # services healthy; migrate "exited (0)"; beat has no healthcheck
+docker compose exec api python -m filingsage.cli ask "..." --ticker AAPL   # CLI inside the stack
 curl localhost:8000/healthz              # liveness
-pip install -e ".[dev]" && pytest        # host-side unit tests
+pip install -e ".[dev]" && pytest        # tests (integration ones need Docker running)
 ruff check src tests                     # lint
 ```
 
 ## Current status (update me)
 
-- [ ] Day 1 — repo scaffold + Compose skeleton (api/worker/postgres/redis, healthchecks green, ping round-trip verified)
-- [ ] Day 1 — `SourceConnector` ABC + `EdgarConnector.discover()` for 3 tickers → local bronze
-- [ ] Day 1–3 — Oracle Cloud signup started (parallel; don't block on it)
-- [x] Week 1 — parse/section → silver Parquet + DQ checks
-- [x] Week 1 — Postgres schema + `events`
-- [x] Week 1 — Actions cron (10-ticker universe) — confirmed firing: `workflow_dispatch` run #1 succeeded in 9s, `trigger-ingest` job green
-- ~~Terraform~~ — superseded by Fly.io (README → Technical Decisions #21); Oracle path abandoned, no Terraform was ever written
-- [x] Week 1 — **live URL with HTTPS** — https://filingsage-api.fly.dev; full discover→fetch→parse pipeline verified end-to-end in production (TSLA 8-K reached `status=parsed` with matching discovered/fetched/parsed events in Neon)
-- [ ] Week 2 — chunking/embeddings/Qdrant hybrid + reranker; cited Q&A v0; minimal frontend; semantic cache
-  - **In progress.** Architectural pivot from spec (README → Technical Decisions #23, #24): embeddings run via FastEmbed (ONNX, ~BGE-small dense + BM25-family sparse) in-worker, not self-hosted PyTorch on the 24GB Oracle VM that never materialized — worker bumped to 512MB on Fly. Rerank + NLI verification deferred to a later increment; ship hybrid retrieval + cited Q&A first, add those as measured improvements per the spec's own naive→hybrid→+rerank→+verification staging.
-  - [ ] Increment 1 — section-aware chunking (`gold/chunking.py`, `chunks` table, no embeddings/Qdrant/network yet)
-- [ ] Week 3 — LangGraph graph; provider routing; email briefs; real JWT auth + quotas
-- [ ] Week 4 — observability full pass; golden dataset + eval CI gate; load-test baseline
-- [ ] Week 5 — frontend polish; public /status; README results table; demo video
-- [ ] Week 6 — buffer + first real users; feedback log; v1.1 design doc
+**Done (verified end-to-end, hosted on Fly before the pause):**
+- [x] Week 1 — Compose skeleton, `SourceConnector` + `EdgarConnector`, bronze → silver Parquet + DQ checks, Postgres schema + `events` outbox, scheduled ingestion, live HTTPS deploy
+- [x] Week 2 — section-aware chunking, FastEmbed dense+sparse embeddings, Qdrant hybrid (RRF) retrieval, cross-encoder rerank, cited Q&A (`POST /qa`) with the zero-LLM-call "never bluff" gate, Redis rate limit, `recover-stale`
+- ~~Terraform / Oracle VM~~ — superseded by Fly.io (decision #21), then by localhost-first (decision #30)
+
+**Localhost v1 roadmap** — one increment at a time, each with tests + run/verify steps:
+
+Phase 0 — local stack
+- [x] L1 — local Qdrant in Compose, auto-migrate service, payload indexes in `ensure_collection()`, Celery beat replaces the GitHub cron, host-facing `.env.example`, `.dockerignore` (decisions #30, #31)
+
+Phase 1 — finish the RAG stack (spec §6)
+- [ ] L2 — NLI claim verification (step 5): per-claim entailment score against cited chunks
+- [ ] L3 — confidence gate (step 6): computed high/medium/low, flagged-unverified claims, one retrieval-expansion retry, honest fallback
+- [ ] L4 — `qa_sessions` / `qa_messages` / `citations` tables; API returns resolved citations; endpoint to open the exact cited filing section
+- [ ] L5 — semantic cache (step 1) in Redis, invalidated when a ticker gets new filings; `cache_hit` metric
+- [ ] L6 — SSE streaming for Q&A (stage-by-stage progress for the UI)
+
+Phase 2 — users & product backend (Week 3)
+- [ ] L7 — real JWT auth (access + refresh), users, roles, per-user quotas (3 tickers, N questions/day)
+- [ ] L8 — watchlist CRUD, filings feed, company search; beat ingests the union of watchlists
+- [ ] L9 — LangGraph graph: planner → FilingAgent + FinancialsAgent (EDGAR XBRL) → verifier → confidence gate (retry ≤1) → composer; typed `AgentState`; Postgres checkpointing
+- [ ] L10 — provider routing with per-provider budgets, retries/backoff, routing-share metric
+- [ ] L11 — email briefs on new filings (`briefs` table, `brief.generated` → `alert.sent`), delivered to a local SMTP catcher (Mailpit)
+
+Phase 3 — quality & observability (Week 4)
+- [ ] L12 — golden dataset v1 (hand-labeled by Arya) + eval harness (hit@k, context precision/recall, citation accuracy, NLI faithfulness) + `eval_runs`; README results table naive → hybrid → +rerank → +verification
+- [ ] L13 — Prometheus metrics (system + AI) + Grafana in Compose with a provisioned dashboard; admin stats endpoints
+- [ ] L14 — CI on PRs: ruff, pytest (testcontainers), retrieval eval gate, docker build
+- [ ] L15 — Locust load-test baseline on localhost, config committed, numbers dated
+
+Phase 4 — frontend (Week 5)
+- [ ] L16 — Next.js app, production-grade design: landing, auth, watchlist dashboard, filing feed with brief cards, streaming chat with citation popovers → exact filing section, public /status, admin dashboard
+- [ ] L17 — polish, demo video, README final pass
+
+**Definition of done (localhost edition):** on a fresh `docker compose up`, a new user signs up at localhost, adds 3 tickers, asks a cited question, receives an email brief in Mailpit when one of their companies files — while Grafana shows it happening.
+
+**Open small items:** `RERANK_SCORE_FLOOR` uncalibrated (needs eval data, L12) · `recover-stale` ignores intact-but-stuck filings · chunking tokenizer downloads from the HF Hub on first use (not baked into the image) · Fly worker machine still exists on the paused hosted deployment.

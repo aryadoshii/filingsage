@@ -4,7 +4,7 @@
 
 Point it at a list of tickers. It discovers every new 10-K, 10-Q, and 8-K from SEC EDGAR, parses them into sections, embeds them into a hybrid vector store, and answers natural-language questions with claims mapped to their source. When the filings don't support an answer, it says so instead of guessing.
 
-**Status:** Weeks 1–2 complete and verified end-to-end in production. The full pipeline — discovery → fetch → parse → chunk → embed → hybrid retrieval → rerank → cited generation — runs against real EDGAR data. Weeks 3+ (agent orchestration, email briefs, auth, frontend) are roadmap.
+**Status:** Weeks 1–2 complete and verified end-to-end in production. The full pipeline — discovery → fetch → parse → chunk → embed → hybrid retrieval → rerank → cited generation — runs against real EDGAR data. The whole system now runs locally on a single `docker compose up` (the hosted deployment is paused; see [decision #30](docs/decisions.md)). Weeks 3+ (agent orchestration, email briefs, auth, frontend) are roadmap.
 
 ---
 
@@ -13,7 +13,8 @@ Point it at a list of tickers. It discovers every new 10-K, 10-Q, and 8-K from S
 | Capability | Status |
 | --- | --- |
 | SEC EDGAR ingestion (10-K / 10-Q / 8-K), rate-limited and idempotent | ✅ Shipped |
-| Automated scheduled ingestion — GitHub Actions cron, every 2h | ✅ Shipped |
+| Automated scheduled ingestion — Celery beat, every 2h | ✅ Shipped |
+| Full stack on one `docker compose up` — API, worker, scheduler, Postgres, Redis, Qdrant | ✅ Shipped |
 | Bronze → silver → gold medallion pipeline | ✅ Shipped |
 | Section-aware parsing across all three form types | ✅ Shipped |
 | Hybrid vector search — BGE-small dense + BM25 sparse, RRF-fused | ✅ Shipped |
@@ -29,7 +30,7 @@ Point it at a list of tickers. It discovers every new 10-K, 10-Q, and 8-K from S
 | JWT auth + per-user quotas | 🗺️ Roadmap |
 | Web frontend | 🗺️ Roadmap |
 
-**Scale so far:** ~1,000 filings discovered across a 10-ticker watchlist · 87 tests.
+**Scale so far:** ~1,000 filings discovered across a 10-ticker watchlist · 94 tests.
 
 ---
 
@@ -61,7 +62,7 @@ curl -X POST https://filingsage-api.fly.dev/qa \
 
 Every `chunk_id` resolves back to a specific filing, form type, filing date, and section. Ask it something the corpus can't support and it returns `insufficient_evidence: true` — without calling an LLM at all.
 
-> **Note on the live demo:** the deployment is real and was verified end-to-end in production. The hosted API is currently paused to avoid running costs on a personal project; everything below runs locally against the same managed services.
+> **Note on the live demo:** the deployment is real and was verified end-to-end in production. The hosted API is currently paused to avoid running costs on a personal project; the same code runs fully on localhost (below), with Postgres, Redis and Qdrant as local containers instead of managed services.
 
 ---
 
@@ -70,8 +71,8 @@ Every `chunk_id` resolves back to a specific filing, form type, filing date, and
 ```mermaid
 flowchart TB
     subgraph ingest["Ingestion — Celery worker"]
-        CRON["GitHub Actions cron<br/>every 2h"] --> API1["POST /internal/ingest"]
-        API1 --> DISC["ingest_watchlist<br/>EDGAR discovery"]
+        BEAT["Celery beat<br/>every 2h"] --> DISC["ingest_watchlist<br/>EDGAR discovery"]
+        API1["POST /internal/ingest<br/>manual trigger"] --> DISC
         DISC --> FETCH["fetch_filing<br/>rate-limited, idempotent"]
         FETCH --> PARSE["parse_filing<br/>section detection + DQ"]
         PARSE --> EMBED["chunk_and_embed<br/>batched, memory-capped"]
@@ -80,8 +81,8 @@ flowchart TB
     subgraph storage["Storage"]
         BRONZE[("Bronze<br/>raw HTML")]
         SILVER[("Silver<br/>sectioned Parquet")]
-        PG[("Neon Postgres<br/>state + event log")]
-        QD[("Qdrant Cloud<br/>dense + sparse vectors")]
+        PG[("Postgres<br/>state + event log")]
+        QD[("Qdrant<br/>dense + sparse vectors")]
     end
 
     subgraph serve["Serving — FastAPI"]
@@ -130,54 +131,63 @@ flowchart TB
 | Layer | Choice |
 | --- | --- |
 | API | FastAPI · Uvicorn |
-| Async pipeline | Celery · Redis (Upstash) |
-| Database | Postgres (Neon) · SQLAlchemy · Alembic |
-| Vector store | Qdrant Cloud (hybrid: named dense + sparse vectors) |
+| Async pipeline | Celery (worker + beat) · Redis |
+| Database | Postgres 16 · SQLAlchemy · Alembic |
+| Vector store | Qdrant (hybrid: named dense + sparse vectors) |
 | Analytics | DuckDB over silver Parquet |
 | Models | FastEmbed / ONNX — BGE-small, BM25, MS MARCO MiniLM cross-encoder |
 | LLM | Groq (primary) → Gemini (fallback) |
 | Parsing | selectolax (Lexbor) · PyArrow |
-| Deploy | Fly.io (two apps, one image) · Docker · GitHub Actions |
+| Run / deploy | Docker Compose (localhost) · Fly.io + Neon + Upstash + Qdrant Cloud (hosted, paused) |
 | Tests | pytest · testcontainers |
 
 ---
 
 ## Running locally
 
+Everything runs on your machine; the only network calls are to SEC EDGAR (public) and the free Groq/Gemini APIs.
+
 ```bash
 git clone https://github.com/aryadoshii/filingsage
 cd filingsage
 
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
-
 cp .env.example .env
 # Required: SEC_CONTACT_EMAIL (SEC fair-access policy mandates a real contact)
-# For retrieval + Q&A: QDRANT_URL, QDRANT_API_KEY, GROQ_API_KEY, GEMINI_API_KEY
+# For Q&A: GROQ_API_KEY and/or GEMINI_API_KEY (both have free tiers)
 
-docker compose up -d postgres redis
-python -m alembic upgrade head
+docker compose up --build -d     # migrate, api, worker, beat, postgres, redis, qdrant
+docker compose ps                # services "healthy"; migrate shows "exited (0)"
 ```
 
-**Ingest, search, ask:**
+The schema is applied automatically by a one-shot `migrate` service before the API and worker start.
+
+**Ingest, search, ask** — the CLI runs inside the API container, so nothing needs installing on the host:
 
 ```bash
-python -m filingsage.cli ingest --tickers AAPL --limit 5
-python -m filingsage.cli search "risks related to competition" --ticker AAPL --limit 5
-python -m filingsage.cli ask "What are Apple's main competitive risks?" --ticker AAPL
+docker compose exec api python -m filingsage.cli ingest AAPL --limit 5
+docker compose logs -f worker      # watch it discover → fetch → parse → embed
+docker compose exec api python -m filingsage.cli search "risks related to competition" --ticker AAPL --limit 5
+docker compose exec api python -m filingsage.cli ask "What are Apple's main competitive risks?" --ticker AAPL
+
+curl -s localhost:8000/qa -H "Content-Type: application/json" \
+  -d '{"question": "What are Apple'\''s main competitive risks?", "ticker": "AAPL"}'
 ```
+
+Beat re-runs ingestion for the default 10-ticker universe every two hours on its own. Qdrant's dashboard is at <http://localhost:6333/dashboard>.
 
 **Recover from data loss** (rebuilds anything whose local files are gone, from EDGAR):
 
 ```bash
-python -m filingsage.cli recover-stale --dry-run
-python -m filingsage.cli recover-stale
+docker compose exec worker python -m filingsage.cli recover-stale --dry-run
+docker compose exec worker python -m filingsage.cli recover-stale
 ```
 
-**Tests:**
+**Tests** (host-side, Python 3.12+):
 
 ```bash
-pytest              # 87 tests; some use testcontainers and need Docker running
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest              # integration tests use testcontainers and need Docker running
 ruff check src tests
 ```
 
@@ -194,7 +204,7 @@ Every non-obvious choice here is documented with its reasoning, the alternative 
 - **Measured before fixing, and the intuitive fix was wrong** — an OOM looked like "two models resident at once." Measuring showed the sparse model costs 0.2MB; FastEmbed's BM25 isn't a neural model at all. The obvious fix would have saved nothing.
 - **A rate limiter that didn't limit anything** — forging `X-Forwarded-For` against the live deployment showed Fly *prepends* rather than replaces, making the limit bypassable by anyone setting a header. `Fly-Client-IP` proved unspoofable under the same test.
 
-📄 **[Full decision log →](docs/decisions.md)** — all 29 entries, including the production incidents and what they cost to learn.
+📄 **[Full decision log →](docs/decisions.md)** — all 31 entries, including the production incidents and what they cost to learn.
 
 ---
 
