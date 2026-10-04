@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     gemini_api_key: str = ""
 
+    # Scheduled ingestion (Celery beat, Technical Decisions #31): how many of
+    # each ticker's most recent filings a scheduled run considers. EDGAR's
+    # "recent" window is newest-first and the dedupe gate skips anything
+    # already known, so a cap still catches every NEW filing — it only bounds
+    # how far back the very first run reaches (~100 filings per ticker
+    # uncapped, a long first embedding run on a laptop).
+    ingest_limit_per_ticker: int = 20
+
     # Local data lake root (gitignored). Prod uses R2 — same layout, different root.
     data_dir: Path = Path("data")
 

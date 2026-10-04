@@ -121,6 +121,24 @@ def ingest_watchlist(tickers: list[str], limit: int | None = None) -> dict:
     return {"discovered": len(refs), "inserted": len(newly_inserted)}
 
 
+@celery_app.task(name="filingsage.scheduled_ingest")
+def scheduled_ingest() -> dict:
+    """Celery beat's entrypoint (celery_app.beat_schedule) — every 2h.
+
+    Resolves the ticker list when it RUNS, not when beat starts: beat
+    pickles a schedule entry's arguments once, so a hard-coded ticker list
+    there would go stale the moment it changes. Today the list is the
+    configured default universe; once watchlists exist it becomes their
+    union, and only this function changes.
+
+    Calls ingest_watchlist in-process (a plain function call, not .delay())
+    — this task is already running on a worker, so another hop through the
+    broker would add a queue round-trip and nothing else.
+    """
+    settings = get_settings()
+    return ingest_watchlist(settings.default_universe, settings.ingest_limit_per_ticker)
+
+
 @celery_app.task(name="filingsage.fetch_filing")
 def fetch_filing(accession_no: str) -> None:
     """Fetch one filing's primary document into bronze; enqueue parse_filing.

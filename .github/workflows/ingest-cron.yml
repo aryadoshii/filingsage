@@ -11,13 +11,20 @@
 #                  set once the app exists — see deploy/README-fly.md.
 #   INGEST_TOKEN — must match the INGEST_TOKEN secret set on the
 #                  filingsage-api Fly app (fly secrets set, same README)
+#
+# SCHEDULE DISABLED (Technical Decisions #31): the hosted API is paused and
+# FilingSage runs localhost-first, where Celery beat owns the 2h schedule —
+# a GitHub-hosted runner can't reach an API on localhost, so the scheduled
+# run only failed every 2 hours. Kept as manual-dispatch so a future hosted
+# deployment can restore the schedule by re-adding the block below:
+#
+#   schedule:
+#     # :17 past every even hour, not :00 — GitHub delays jobs scheduled at
+#     # :00 under platform load, since that's when everyone else's cron fires.
+#     - cron: "17 */2 * * *"
 name: ingest-cron
 
 on:
-  schedule:
-    # :17 past every even hour, not :00 — GitHub delays jobs scheduled at
-    # :00 under platform load, since that's when everyone else's cron fires.
-    - cron: "17 */2 * * *"
   workflow_dispatch: {}
 
 jobs:

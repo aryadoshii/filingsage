@@ -6,6 +6,7 @@ seam later only if volume ever justifies it.
 """
 
 from celery import Celery
+from celery.schedules import crontab
 
 from filingsage.config import get_settings
 
@@ -52,4 +53,20 @@ celery_app.conf.update(
     # meaningfully fewer checks, still frequent enough to catch a dead
     # connection well within a 2h window.
     broker_heartbeat=300,
+    # --- Scheduled ingestion (Technical Decisions #31) ---
+    # Celery beat replaces the GitHub Actions cron for the localhost stack:
+    # a cron on GitHub's runners can't reach an API on localhost, and the
+    # spec's own §2 diagram already names "Celery workers + beat". Same
+    # cadence as the old cron, and the same off-the-hour minute (:17) so a
+    # future hosted deployment can flip back without changing behavior.
+    # The schedule names a task, not its arguments: scheduled_ingest
+    # resolves WHICH tickers at run time, so the list can later come from
+    # users' watchlists without restarting beat.
+    beat_schedule={
+        "scheduled-ingest-every-2h": {
+            "task": "filingsage.scheduled_ingest",
+            "schedule": crontab(minute=17, hour="*/2"),
+        },
+    },
+    timezone="UTC",
 )
