@@ -1,5 +1,12 @@
 from filingsage.connectors.base import SourceConnector
 from filingsage.connectors.edgar import EdgarClient, EdgarConnector, UnknownTickerError
-from filingsage.connectors.models import FilingRef
+from filingsage.connectors.models import CompanyProfile, FilingRef
 
-__all__ = ["SourceConnector", "EdgarClient", "EdgarConnector", "FilingRef", "UnknownTickerError"]
+__all__ = [
+    "CompanyProfile",
+    "EdgarClient",
+    "EdgarConnector",
+    "FilingRef",
+    "SourceConnector",
+    "UnknownTickerError",
+]

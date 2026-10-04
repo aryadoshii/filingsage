@@ -19,10 +19,13 @@ import httpx
 
 from filingsage import __version__
 from filingsage.connectors.base import SourceConnector
-from filingsage.connectors.models import FilingRef
+from filingsage.connectors.models import CompanyProfile, FilingRef
 
 TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
+# Every XBRL fact a company has ever reported, in one JSON document — the
+# official source behind financial statements on any finance site.
+COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession_nodash}/{document}"
 DEFAULT_FORMS: tuple[str, ...] = ("10-K", "10-Q", "8-K")
 RETRYABLE_STATUSES = frozenset({403, 429, 500, 502, 503, 504})
@@ -149,15 +152,18 @@ class EdgarConnector(SourceConnector):
             recent = data["filings"]["recent"]
             # EDGAR returns parallel arrays, not a list of objects. strict=True
             # makes a length mismatch fail loudly instead of silently pairing
-            # a filing with the wrong date.
+            # a filing with the wrong date. "items" (8-K item codes) is
+            # treated as optional so a response without it still parses.
+            items = recent.get("items") or [""] * len(recent["accessionNumber"])
             rows = zip(
                 recent["accessionNumber"],
                 recent["form"],
                 recent["filingDate"],
                 recent["primaryDocument"],
+                items,
                 strict=True,
             )
-            for accession, form, filed, primary in rows:
+            for accession, form, filed, primary, item_codes in rows:
                 if form not in wanted:
                     continue
                 filed_at = date.fromisoformat(filed)
@@ -172,9 +178,32 @@ class EdgarConnector(SourceConnector):
                         form_type=form,
                         filed_at=filed_at,
                         primary_document=primary,
+                        items=item_codes or "",
                     )
                 )
         return found
+
+    def profile(self, cik: int) -> CompanyProfile:
+        """Company details + 8-K item codes from the submissions API."""
+        data = self._client.get_json(SUBMISSIONS_URL.format(cik=cik))
+        self._write_bronze(Path("submissions") / f"CIK{cik:010d}.json", data)
+        return parse_profile(cik, data)
+
+    def company_facts(self, cik: int) -> dict | None:
+        """The company's full XBRL fact set, or None if it has none.
+
+        A 404 is a real answer here, not an error: companies that have never
+        filed XBRL financial statements (rare among listed US companies)
+        simply have no companyfacts document.
+        """
+        try:
+            data = self._client.get_json(COMPANY_FACTS_URL.format(cik=cik))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        self._write_bronze(Path("xbrl") / f"CIK{cik:010d}.json", data)
+        return data
 
     def bronze_path(self, ref: FilingRef) -> Path:
         """Immutable bronze location: keyed by accession number (spec §5)."""
@@ -216,3 +245,20 @@ class EdgarConnector(SourceConnector):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload))
         return path
+
+
+def parse_profile(cik: int, data: dict) -> CompanyProfile:
+    """Pure: submissions JSON -> CompanyProfile. Separate from profile() so
+    tests can feed it a fixture without any HTTP."""
+    recent = data.get("filings", {}).get("recent", {})
+    accessions = recent.get("accessionNumber", [])
+    items = recent.get("items") or [""] * len(accessions)
+    exchanges = [x for x in (data.get("exchanges") or []) if x]
+    return CompanyProfile(
+        cik=cik,
+        name=data.get("name") or "",
+        sector=data.get("sicDescription") or None,
+        fiscal_year_end=data.get("fiscalYearEnd") or None,
+        exchange=exchanges[0] if exchanges else None,
+        items_by_accession={acc: code for acc, code in zip(accessions, items, strict=False) if code},
+    )

@@ -21,3 +21,19 @@ class FilingRef(BaseModel):
     form_type: str         # e.g. "10-K"
     filed_at: date
     primary_document: str  # e.g. "aapl-20250628.htm"
+    items: str = ""        # 8-K item codes, e.g. "2.02,9.01"; empty for 10-K/10-Q
+
+
+class CompanyProfile(BaseModel):
+    """Company details from EDGAR's submissions API, plus the 8-K item codes
+    of every filing in its recent window (used to backfill filings that were
+    discovered before item codes were stored)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    cik: int
+    name: str
+    sector: str | None        # SIC description, e.g. "Electronic Computers"
+    fiscal_year_end: str | None  # MMDD, e.g. "0927"
+    exchange: str | None
+    items_by_accession: dict[str, str]

@@ -1,4 +1,5 @@
-"""Core schema, spec §4: companies, filings, events, chunks (auth tables land Week 3).
+"""Core schema, spec §4: companies, filings, events, chunks, financial facts
+(auth tables land with roadmap L7).
 
 Schema-as-code: this metadata is the single source of truth; Alembic
 autogenerates migrations by diffing against it.
@@ -12,8 +13,10 @@ from datetime import date, datetime
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -57,7 +60,16 @@ class Company(Base):
     cik: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     ticker: Mapped[str] = mapped_column(String(12), unique=True, index=True)
     name: Mapped[str] = mapped_column(Text)
+    # SEC's SIC industry description (e.g. "Electronic Computers"), from the
+    # submissions API — the closest thing EDGAR has to a sector.
     sector: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Fiscal year end as EDGAR reports it, MMDD ("0927" = late September).
+    fiscal_year_end: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    exchange: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # When financial_facts were last rebuilt from XBRL; null = never.
+    financials_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -74,6 +86,10 @@ class Filing(Base):
     primary_document: Mapped[str] = mapped_column(Text)
     r2_bronze_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     r2_silver_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 8-K item codes as EDGAR lists them ("2.02,9.01") — what kind of event
+    # the filing reports. Null for 10-K/10-Q and for filings discovered
+    # before this column existed (backfilled by refresh_company).
+    items: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(
         String(32), default=FilingStatus.DISCOVERED.value, index=True
     )
@@ -124,4 +140,38 @@ class Event(Base):
     payload_json: Mapped[dict] = mapped_column(PortableJSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+class FinancialFact(Base):
+    """One reported (or derived) number from a company's XBRL financial data.
+
+    Rebuilt wholesale per company from SEC's companyfacts API by
+    financials/xbrl.py — never edited in place — so this table is a
+    re-derivable cache in the same spirit as bronze/silver: the SEC is the
+    source of truth.
+
+    period is "quarter" or "annual" for flow metrics (revenue, net income,
+    cash flow; start..end is the reporting period) and "instant" for balance
+    sheet metrics (cash, debt; start is null, end is the balance-sheet date).
+    derived=True marks a quarter we computed rather than read — e.g. Q4 =
+    full year minus Q1-Q3, because companies report Q4 only inside the 10-K.
+    """
+
+    __tablename__ = "financial_facts"
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
+    cik: Mapped[int] = mapped_column(ForeignKey("companies.cik"), index=True)
+    metric: Mapped[str] = mapped_column(String(48))
+    period: Mapped[str] = mapped_column(String(8))
+    start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    end: Mapped[date] = mapped_column(Date)
+    value: Mapped[float] = mapped_column(Float)
+    unit: Mapped[str] = mapped_column(String(16))
+    derived: Mapped[bool] = mapped_column(Boolean, default=False)
+    concept: Mapped[str] = mapped_column(String(128))
+    accession_no: Mapped[str | None] = mapped_column(String(25), nullable=True)
+    filed: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("cik", "metric", "period", "end", name="uq_financial_facts_period"),
     )
