@@ -8,13 +8,14 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 
 from filingsage.db.models import Chunk as ChunkRow
 from filingsage.gold.embedding import EMBED_BATCH_SIZE
 from filingsage.gold.vector_store import (
     COLLECTION_NAME,
     DENSE_VECTOR_NAME,
+    PAYLOAD_INDEXES,
     SPARSE_VECTOR_NAME,
     ensure_collection,
     point_id_for,
@@ -69,6 +70,78 @@ def test_ensure_collection_is_idempotent():
     info = client.get_collection(COLLECTION_NAME)
     assert DENSE_VECTOR_NAME in info.config.params.vectors
     assert SPARSE_VECTOR_NAME in info.config.params.sparse_vectors
+
+
+class _IndexSpyClient:
+    """Proxies a real in-memory QdrantClient but records create_payload_index
+    calls, and can pretend some indexes already exist. Needed because
+    qdrant-client's local mode accepts create_payload_index as a no-op and
+    always reports an empty payload_schema — it can't show us what a server
+    Qdrant would actually hold, so the spy plays that part.
+    """
+
+    def __init__(self, inner: QdrantClient, already_indexed: set[str] | None = None):
+        self._inner = inner
+        self._already_indexed = already_indexed or set()
+        self.index_calls: list[tuple[str, models.PayloadSchemaType]] = []
+        self.create_collection_calls = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def create_collection(self, *args, **kwargs):
+        self.create_collection_calls += 1
+        return self._inner.create_collection(*args, **kwargs)
+
+    def get_collection(self, name):
+        info = self._inner.get_collection(name)
+        info.payload_schema = {
+            field: models.PayloadIndexInfo(
+                data_type=PAYLOAD_INDEXES[field], points=0
+            )
+            for field in self._already_indexed
+        }
+        return info
+
+    def create_payload_index(self, *, collection_name, field_name, field_schema):
+        self.index_calls.append((field_name, field_schema))
+
+
+def test_ensure_collection_creates_an_index_for_every_filtered_field():
+    """retrieval.py filters on ticker, form_type and filed_at — each needs a
+    payload index, or Qdrant Cloud rejects the filtered query outright
+    (`400 Index required but not found`, seen in production)."""
+    spy = _IndexSpyClient(QdrantClient(":memory:"))
+
+    ensure_collection(spy)
+
+    assert dict(spy.index_calls) == {
+        "ticker": models.PayloadSchemaType.KEYWORD,
+        "form_type": models.PayloadSchemaType.KEYWORD,
+        "filed_at": models.PayloadSchemaType.DATETIME,  # range filter, not exact match
+    }
+
+
+def test_ensure_collection_adds_only_missing_indexes_to_an_existing_collection():
+    inner = QdrantClient(":memory:")
+    ensure_collection(inner)  # collection already exists, built before indexes were in code
+    spy = _IndexSpyClient(inner, already_indexed={"ticker"})
+
+    ensure_collection(spy)
+
+    assert spy.create_collection_calls == 0
+    assert sorted(field for field, _ in spy.index_calls) == ["filed_at", "form_type"]
+
+
+def test_ensure_collection_is_a_noop_when_collection_and_indexes_exist():
+    inner = QdrantClient(":memory:")
+    ensure_collection(inner)
+    spy = _IndexSpyClient(inner, already_indexed=set(PAYLOAD_INDEXES))
+
+    ensure_collection(spy)
+
+    assert spy.create_collection_calls == 0
+    assert spy.index_calls == []
 
 
 def test_upsert_chunks_writes_both_vectors_and_full_payload():

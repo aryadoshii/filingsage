@@ -16,6 +16,7 @@ from filingsage.api.rate_limit import (
 )
 from filingsage.config import get_settings
 from filingsage.gold.qa import Answer, answer_question
+from filingsage.gold.vector_store import ensure_collection
 from filingsage.worker.tasks import ingest_watchlist
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,24 @@ async def lifespan(app: FastAPI):
         "per-IP rate limit (%d req / %ds).",
         RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS,
     )
+    _ensure_vector_store()
     yield
+
+
+def _ensure_vector_store() -> None:
+    """Create the Qdrant collection + payload indexes at startup.
+
+    On a fresh local stack nothing has been embedded yet, so without this
+    the first /qa would hit "collection not found" and return a 503 instead
+    of the honest insufficient-evidence answer an empty corpus deserves.
+    Best-effort: Qdrant being down at startup must not stop the API from
+    serving /healthz and /internal/ingest — the worker's own
+    ensure_collection() call before every upsert covers it later.
+    """
+    try:
+        ensure_collection()
+    except Exception:
+        logger.warning("startup: Qdrant not reachable — collection not ensured", exc_info=True)
 
 
 app = FastAPI(

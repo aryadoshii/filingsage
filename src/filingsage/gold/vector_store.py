@@ -45,14 +45,44 @@ def point_id_for(accession_number: str, seq: int) -> str:
     return str(uuid.uuid5(_POINT_ID_NAMESPACE, f"{accession_number}:{seq}"))
 
 
+# Every payload field retrieval.py filters on, with the index type that
+# filter needs. Qdrant Cloud rejected the very first filtered production
+# query with `400 Index required but not found for "ticker"` — the indexes
+# were then created by a one-off script, which a fresh local Qdrant (or any
+# rebuilt collection) would never get. Keeping them here, next to the
+# collection definition, means the schema retrieval depends on is created
+# by the same code path that creates the collection itself.
+PAYLOAD_INDEXES: dict[str, models.PayloadSchemaType] = {
+    "ticker": models.PayloadSchemaType.KEYWORD,
+    "form_type": models.PayloadSchemaType.KEYWORD,
+    # DATETIME, not KEYWORD: `since` is a range filter (DatetimeRange gte),
+    # and an exact-match keyword index can't serve a range query.
+    "filed_at": models.PayloadSchemaType.DATETIME,
+}
+
+
 def ensure_collection(client: QdrantClient | None = None) -> None:
-    """Create the `filings` collection if it doesn't exist. Idempotent —
-    safe to call before every upsert (upsert_chunks does exactly that), not
-    just once at startup, since the check is a single cheap API call.
+    """Create the `filings` collection and its payload indexes if missing.
+
+    Idempotent — safe to call before every upsert (upsert_chunks does
+    exactly that) and at API startup. Missing indexes are created even on a
+    collection that already exists, so a collection built before an index
+    was added to PAYLOAD_INDEXES gets upgraded in place instead of failing
+    filtered queries forever.
     """
     client = client or get_client()
-    if client.collection_exists(COLLECTION_NAME):
-        return
+    if not client.collection_exists(COLLECTION_NAME):
+        _create_collection(client)
+
+    existing = client.get_collection(COLLECTION_NAME).payload_schema or {}
+    for field_name, schema in PAYLOAD_INDEXES.items():
+        if field_name not in existing:
+            client.create_payload_index(
+                collection_name=COLLECTION_NAME, field_name=field_name, field_schema=schema
+            )
+
+
+def _create_collection(client: QdrantClient) -> None:
     client.create_collection(
         collection_name=COLLECTION_NAME,
         vectors_config={

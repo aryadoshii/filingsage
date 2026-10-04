@@ -67,3 +67,10 @@ select = ["E4", "E7", "E9", "F", "I"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["integration: requires a running Docker daemon (testcontainers)"]
+filterwarnings = [
+    # Tests use qdrant-client's in-memory local mode, which accepts
+    # create_payload_index() as a no-op and warns on every call. Real
+    # (server) Qdrant builds the indexes; test_vector_store.py checks the
+    # calls themselves with a spy client.
+    "ignore:Payload indexes have no effect in the local Qdrant:UserWarning",
+]

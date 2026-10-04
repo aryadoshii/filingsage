@@ -95,3 +95,28 @@ def test_ingest_trigger_202_with_explicit_tickers_and_limit(monkeypatch):
     assert resp.status_code == 202
     assert resp.json() == {"task_id": "xyz-789"}
     assert calls == [((["TSLA"], 3), {})]
+
+
+def test_startup_ensures_the_vector_store_collection(monkeypatch):
+    """A fresh local stack has an empty Qdrant — startup creates the
+    collection so the first /qa gets an honest insufficient-evidence answer
+    instead of a 503 from "collection not found"."""
+    calls: list = []
+    monkeypatch.setattr(main, "ensure_collection", lambda: calls.append(True))
+
+    with TestClient(main.app):  # context manager = lifespan actually runs
+        pass
+
+    assert calls == [True]
+
+
+def test_startup_survives_qdrant_being_down(monkeypatch):
+    def boom():
+        raise ConnectionError("qdrant unreachable")
+
+    monkeypatch.setattr(main, "ensure_collection", boom)
+
+    with TestClient(main.app) as live_client:
+        resp = live_client.get("/healthz")
+
+    assert resp.status_code == 200
