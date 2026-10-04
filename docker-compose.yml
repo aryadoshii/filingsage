@@ -27,6 +27,41 @@ services:
       timeout: 3s
       retries: 10
 
+  # Local vector store — replaces Qdrant Cloud for the localhost stack
+  # (Technical Decisions #30). Pinned to the server minor matching the
+  # qdrant-client this repo is tested with; qdrant-client warns when client
+  # and server minors drift apart. REST only (6333) — the app never uses gRPC.
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    ports:
+      - "6333:6333"           # REST API + built-in web UI at /dashboard
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # The Qdrant image ships without curl/wget, so probe the port with
+      # bash's /dev/tcp instead: "is the REST server accepting connections".
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: applies Alembic migrations, then exits 0. api and worker wait
+  # for it (service_completed_successfully), so a fresh `docker compose up`
+  # never serves requests against a database with no tables — the gap that
+  # caused a real UndefinedTable error in production (Technical Decisions #22).
+  migrate:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://filingsage:filingsage@postgres:5432/filingsage
+    command: ["alembic", "upgrade", "head"]
+    volumes:
+      - ./migrations:/app/migrations   # new migration files apply without a rebuild
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build: .
     env_file: .env
@@ -37,6 +72,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://filingsage:filingsage@postgres:5432/filingsage
       REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ""      # local Qdrant has no auth; never send a cloud key to it
     command: ["uvicorn", "filingsage.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     ports:
       - "8000:8000"
@@ -47,6 +84,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status == 200 else 1)"]
       interval: 10s
@@ -61,6 +102,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://filingsage:filingsage@postgres:5432/filingsage
       REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ""      # local Qdrant has no auth; never send a cloud key to it
     # --without-gossip/--without-mingle: both are peer-discovery/sync
     # features for MULTI-worker deployments (gossip continuously
     # pubsub-announces this worker to others via the broker; mingle
@@ -78,6 +121,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "celery -A filingsage.worker.celery_app:celery_app inspect ping"]
       interval: 30s
@@ -85,5 +132,25 @@ services:
       retries: 3
       start_period: 20s
 
+  # Scheduler: enqueues filingsage.scheduled_ingest every 2h (celery_app.py
+  # beat_schedule) — the localhost replacement for the GitHub Actions cron
+  # (Technical Decisions #31). Exactly ONE beat process may run: two would
+  # enqueue every scheduled run twice. It only publishes messages; the
+  # worker above does the work. The schedule state file lives in /tmp —
+  # throwaway, so a restart simply recomputes the next :17-past-even-hour.
+  beat:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://filingsage:filingsage@postgres:5432/filingsage
+      REDIS_URL: redis://redis:6379/0
+    command: ["celery", "-A", "filingsage.worker.celery_app:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  qdrant_data:

@@ -17,6 +17,11 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY src/ ./src/
+# Migrations ship in the image so the schema can be applied from inside the
+# stack (the one-shot `migrate` Compose service) — no host-side Python needed
+# just to create tables.
+COPY alembic.ini ./
+COPY migrations/ ./migrations/
 # Editable install + the bind mount in compose = live-reload dev loop.
 # Image rebuilds are only needed when dependencies change, so we skip
 # layer-split caching gymnastics for now; a pinned lockfile is a later pass.

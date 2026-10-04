@@ -1,0 +1,23 @@
+# Keeps the build context to what the image actually needs (pyproject.toml +
+# src/). Without this, `docker compose build` shipped the whole working tree
+# to the daemon — including .venv — and warned about a ~554MB context.
+.git
+.github
+.venv
+venv
+data
+tests
+docs
+deploy
+**/__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.DS_Store
+node_modules
+frontend
+# Secrets never enter an image layer. Compose reads env_file on the host.
+.env
+.env.*

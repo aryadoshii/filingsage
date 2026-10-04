@@ -34,11 +34,13 @@ class Settings(BaseSettings):
         "META", "TSLA", "JPM", "V", "UNH",
     ]
 
-    # Qdrant Cloud cluster (gold-layer hybrid vector store, Week 2 increment
-    # 2). REST API, not gRPC — port 6333. Empty by default; get_client()
-    # doesn't validate these the way EdgarClient validates sec_contact_email,
-    # since Qdrant itself rejects a bad/missing URL or key on first request.
-    qdrant_url: str = ""
+    # Gold-layer hybrid vector store. REST API, not gRPC — port 6333.
+    # Default is the Compose service (localhost-first, Technical Decisions
+    # #30), same convention as database_url/redis_url above; a host-side
+    # run sets QDRANT_URL=http://localhost:6333 in .env. The API key is only
+    # for a managed cluster (Qdrant Cloud) — a local Qdrant has no auth, so
+    # it stays empty and get_client() sends none.
+    qdrant_url: str = "http://qdrant:6333"
     qdrant_api_key: str = ""
 
     # Cited Q&A (gold/qa.py, Week 2 increment 4). Groq is primary (spec:
