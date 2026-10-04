@@ -4,9 +4,11 @@ import logging
 import secrets
 from contextlib import asynccontextmanager
 from datetime import date
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from filingsage import __version__
 from filingsage.api.catalog import router as catalog_router
@@ -16,7 +18,10 @@ from filingsage.api.rate_limit import (
     check_rate_limit,
 )
 from filingsage.config import get_settings
+from filingsage.db.models import Company
+from filingsage.db.session import session_scope
 from filingsage.gold.qa import Answer, answer_question
+from filingsage.gold.scope import detect_ticker
 from filingsage.gold.vector_store import ensure_collection
 from filingsage.worker.tasks import ingest_watchlist
 
@@ -151,8 +156,28 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+class QAResponse(Answer):
+    """The answer plus which company's filings were searched, so a client
+    can show "Searched AMZN (from your question)" instead of guessing."""
+
+    scope_ticker: str | None = None
+    scope_source: Literal["filter", "question"] | None = None
+
+
+def _infer_ticker(question: str) -> str | None:
+    """Best-effort: a database hiccup here must not fail the question — it
+    just falls back to searching every company."""
+    try:
+        with session_scope() as session:
+            companies = session.execute(select(Company.ticker, Company.name)).all()
+    except Exception:
+        logger.warning("qa: couldn't load companies for scope detection", exc_info=True)
+        return None
+    return detect_ticker(question, [(t, n) for t, n in companies])
+
+
 @app.post("/qa", tags=["qa"])
-def ask_question(body: QARequest, request: Request) -> Answer:
+def ask_question(body: QARequest, request: Request) -> QAResponse:
     """Cited Q&A over embedded filing chunks (spec §6 step 4).
 
     NO AUTH YET — intentional, not an oversight: this is the first
@@ -188,10 +213,16 @@ def ask_question(body: QARequest, request: Request) -> Answer:
             ),
         )
 
+    ticker, source = (body.ticker.upper(), "filter") if body.ticker else (None, None)
+    if ticker is None:
+        ticker = _infer_ticker(body.question)
+        source = "question" if ticker else None
+
     try:
-        return answer_question(
-            body.question, ticker=body.ticker, form_type=body.form_type, since=body.since
+        answer = answer_question(
+            body.question, ticker=ticker, form_type=body.form_type, since=body.since
         )
+        return QAResponse(**answer.model_dump(), scope_ticker=ticker, scope_source=source)
     except Exception:
         # Never leak internals (LLM/Qdrant errors, stack traces) to the
         # caller — log the real exception server-side, return a generic 503.

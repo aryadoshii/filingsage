@@ -33,6 +33,9 @@ def _bypass_rate_limit(monkeypatch):
     this itself with a real limiter.
     """
     monkeypatch.setattr(main, "check_rate_limit", lambda ip: True)
+    # No database in these tests: questions that don't name a ticker stay
+    # unscoped unless a test opts in to inference below.
+    monkeypatch.setattr(main, "_infer_ticker", lambda question: None)
 
 
 def test_valid_request_returns_200_with_answer_shape(monkeypatch):
@@ -47,6 +50,8 @@ def test_valid_request_returns_200_with_answer_shape(monkeypatch):
         "claims": [{"text": "Price competition pressures margins.", "chunk_ids": [1, 2]}],
         "confidence": "high",
         "insufficient_evidence": False,
+        "scope_ticker": "AAPL",
+        "scope_source": "filter",
     }
 
 
@@ -129,3 +134,28 @@ def test_rate_limit_returns_429_after_max_requests(monkeypatch):
     statuses = [r.status_code for r in responses]
     assert statuses[:-1] == [200] * rate_limit.RATE_LIMIT_MAX_REQUESTS
     assert statuses[-1] == 429
+
+
+def test_unscoped_question_is_scoped_to_the_company_it_names(monkeypatch):
+    seen = {}
+
+    def fake_answer(question, **kwargs):
+        seen.update(kwargs)
+        return _ANSWER
+
+    monkeypatch.setattr(main, "answer_question", fake_answer)
+    monkeypatch.setattr(main, "_infer_ticker", lambda question: "AMZN")
+
+    body = client.post("/qa", json={"question": "How is Amazon doing?"}).json()
+
+    assert seen["ticker"] == "AMZN"
+    assert (body["scope_ticker"], body["scope_source"]) == ("AMZN", "question")
+
+
+def test_an_explicit_filter_always_wins_over_inference(monkeypatch):
+    monkeypatch.setattr(main, "answer_question", lambda *a, **k: _ANSWER)
+    monkeypatch.setattr(main, "_infer_ticker", lambda question: "AMZN")
+
+    body = client.post("/qa", json={"question": "How is Amazon doing?", "ticker": "msft"}).json()
+
+    assert (body["scope_ticker"], body["scope_source"]) == ("MSFT", "filter")
