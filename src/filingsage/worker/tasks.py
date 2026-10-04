@@ -13,6 +13,7 @@ whether to continue (e.g. parse_filing does not re-enqueue on quarantine).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from celery.utils.log import get_task_logger
@@ -25,12 +26,22 @@ from filingsage.db.events import emit_event
 from filingsage.db.models import Chunk as ChunkRow
 from filingsage.db.models import Company, Filing, FilingStatus
 from filingsage.db.session import session_scope
+from filingsage.financials.store import apply_profile, replace_facts
+from filingsage.financials.xbrl import extract_facts
 from filingsage.gold.chunking import chunk_filing, persist_chunks
 from filingsage.gold.vector_store import upsert_chunks
 from filingsage.parsing.silver import ParseQuarantineError, parse_to_silver
 from filingsage.worker.celery_app import celery_app
 
 logger = get_task_logger(__name__)
+
+# Financials change only when a company files a 10-K/10-Q, which triggers a
+# refresh immediately (see ingest_watchlist). This interval is just the
+# safety net — e.g. a restatement filed as an amendment the watchlist
+# doesn't ingest — so it's measured in days, not hours: one companyfacts
+# request per company per week is negligible against SEC's rate limit.
+FINANCIALS_MAX_AGE = timedelta(days=7)
+PERIODIC_FORMS = frozenset({"10-K", "10-Q"})
 
 
 def _connector() -> EdgarConnector:
@@ -79,6 +90,7 @@ def ingest_watchlist(tickers: list[str], limit: int | None = None) -> dict:
         by_ticker.setdefault(ref.ticker, []).append(ref)
 
     newly_inserted: list[str] = []
+    refresh_ciks: set[int] = set()  # companies whose financials need rebuilding
     with session_scope() as session:
         for rows in by_ticker.values():
             selected = rows[:limit] if limit is not None else rows
@@ -98,6 +110,7 @@ def ingest_watchlist(tickers: list[str], limit: int | None = None) -> dict:
                         form_type=ref.form_type,
                         filed_at=ref.filed_at,
                         primary_document=ref.primary_document,
+                        items=ref.items or None,
                         status=FilingStatus.DISCOVERED.value,
                     )
                     .on_conflict_do_nothing(index_elements=["accession_no"])
@@ -106,6 +119,8 @@ def ingest_watchlist(tickers: list[str], limit: int | None = None) -> dict:
                 if result.first() is None:
                     continue  # already known — dedupe gate, skip silently
                 newly_inserted.append(ref.accession_number)
+                if ref.form_type in PERIODIC_FORMS:
+                    refresh_ciks.add(ref.cik)
                 emit_event(
                     session,
                     "filing.discovered",
@@ -113,12 +128,52 @@ def ingest_watchlist(tickers: list[str], limit: int | None = None) -> dict:
                     {"ticker": ref.ticker, "form_type": ref.form_type},
                 )
 
+        # Also refresh any company whose financials were never fetched or
+        # have gone stale — the safety net behind the new-10-K/10-Q trigger.
+        stale_before = datetime.now(UTC) - FINANCIALS_MAX_AGE
+        watched = {ref.cik for ref in refs}
+        for company in session.scalars(select(Company).where(Company.cik.in_(watched))):
+            if company.financials_updated_at is None or company.financials_updated_at < stale_before:
+                refresh_ciks.add(company.cik)
+
     # Enqueue only after the transaction committed — never fetch a filing
     # whose "discovered" row might not actually be in the database.
     for accession_no in newly_inserted:
         fetch_filing.delay(accession_no)
+    for cik in sorted(refresh_ciks):
+        refresh_company.delay(cik)
 
     return {"discovered": len(refs), "inserted": len(newly_inserted)}
+
+
+@celery_app.task(name="filingsage.refresh_company")
+def refresh_company(cik: int) -> dict:
+    """Rebuild one company's profile and financial facts from EDGAR.
+
+    Two requests (submissions + XBRL companyfacts), both made BEFORE the
+    transaction opens, so no database connection is held across network
+    calls. The facts are then replaced wholesale in one transaction with a
+    company.refreshed event — readers see the old set or the new set, never
+    a half-written mix.
+    """
+    connector = _connector()
+    profile = connector.profile(cik)
+    document = connector.company_facts(cik)
+    facts = extract_facts(document) if document else []
+
+    with session_scope() as session:
+        company = session.get(Company, cik)
+        if company is None:
+            logger.warning("refresh_company: unknown cik %s", cik)
+            return {"cik": cik, "facts": 0}
+        backfilled = apply_profile(session, company, profile)
+        fact_count = replace_facts(session, cik, facts)
+        company.financials_updated_at = datetime.now(UTC)
+        emit_event(
+            session, "company.refreshed", company.ticker,
+            {"facts": fact_count, "items_backfilled": backfilled},
+        )
+    return {"cik": cik, "facts": fact_count, "items_backfilled": backfilled}
 
 
 @celery_app.task(name="filingsage.scheduled_ingest")

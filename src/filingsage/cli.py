@@ -15,7 +15,7 @@ from filingsage.worker.recovery import (
     RECOVERY_BATCH_SIZE,
     recover_stale_filings,
 )
-from filingsage.worker.tasks import ingest_watchlist
+from filingsage.worker.tasks import ingest_watchlist, refresh_company
 
 
 def _build_connector() -> EdgarConnector:
@@ -131,6 +131,19 @@ def cmd_recover_stale(args: argparse.Namespace) -> None:
         )
 
 
+def cmd_refresh_company(args: argparse.Namespace) -> None:
+    """Rebuild a company's profile + XBRL financials now, in this process
+    (the worker does the same automatically after a new 10-K/10-Q)."""
+    connector = _build_connector()
+    for ticker in args.tickers:
+        cik, _name = connector.resolve(ticker)
+        result = refresh_company(cik)
+        print(
+            f"{ticker.upper()}: {result['facts']} financial facts stored, "
+            f"{result.get('items_backfilled', 0)} 8-K item codes backfilled"
+        )
+
+
 def cmd_ask(args: argparse.Namespace) -> None:
     result = answer_question(
         args.query, ticker=args.ticker, form_type=args.form_type, since=args.since
@@ -231,6 +244,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         help=f"Seconds to wait between batches (default {RECOVERY_BATCH_DELAY_SECONDS:.0f})",
     )
     p_recover.set_defaults(func=cmd_recover_stale)
+
+    p_refresh = sub.add_parser(
+        "refresh-company",
+        help="Fetch a company's profile and XBRL financials from EDGAR now",
+    )
+    p_refresh.add_argument("tickers", nargs="+", help="Ticker symbols, e.g. AAPL MSFT")
+    p_refresh.set_defaults(func=cmd_refresh_company)
 
     p_ask = sub.add_parser(
         "ask", help="Cited Q&A over embedded filing chunks (spec §6 step 4, straight RAG)"
