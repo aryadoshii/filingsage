@@ -37,6 +37,11 @@ dependencies = [
     # hands back an already-validated object (response.parsed), rather than
     # us hand-parsing JSON for this provider too.
     "google-genai>=2.14",
+    # Fetches + caches the chunking tokenizer's tokenizer.json under HF_HOME
+    # (gold/chunking.py), so the Dockerfile can bake it into the image. Not
+    # a new install — fastembed and tokenizers already depend on it — but
+    # declared because we now import it directly.
+    "huggingface-hub>=0.20",
 ]
 
 [project.optional-dependencies]

@@ -30,6 +30,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import pyarrow.parquet as pq
+from huggingface_hub import hf_hub_download
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from tokenizers import Tokenizer
@@ -58,7 +59,12 @@ CHUNK_OVERLAP_TOKENS = 64
 
 @lru_cache(maxsize=1)
 def _tokenizer() -> Tokenizer:
-    return Tokenizer.from_pretrained(TOKENIZER_MODEL)
+    """Load tokenizer.json through huggingface_hub (already a dependency of
+    fastembed and tokenizers) rather than Tokenizer.from_pretrained: it
+    caches under HF_HOME, so the Dockerfile can bake this file into the
+    image at a known path and containers stop re-downloading it on first
+    use. Same file, byte-identical tokenization."""
+    return Tokenizer.from_file(hf_hub_download(TOKENIZER_MODEL, "tokenizer.json"))
 
 
 def count_tokens(text: str) -> int:
