@@ -1,6 +1,6 @@
 # FilingSage
 
-**An AI research analyst that watches SEC filings and answers questions about them — with citations traced back to the exact filing section.**
+**A research site for US companies built entirely from their SEC filings: financials, events, and cited answers traced back to the exact filing text.**
 
 Point it at a list of tickers. It discovers every new 10-K, 10-Q, and 8-K from SEC EDGAR, parses them into sections, embeds them into a hybrid vector store, and answers natural-language questions with claims mapped to their source. When the filings don't support an answer, it says so instead of guessing.
 
@@ -28,10 +28,16 @@ Point it at a list of tickers. It discovers every new 10-K, 10-Q, and 8-K from S
 | LangGraph agent orchestration | 🗺️ Roadmap |
 | Email briefs on new filings | 🗺️ Roadmap |
 | JWT auth + per-user quotas | 🗺️ Roadmap |
-| Web dashboard — ask with highlighted sources, track companies, live pipeline view | ✅ Shipped (Streamlit) |
+| Company research pages — key stats, quarterly/annual financials from XBRL, margins, 8-K events timeline, CSV export | ✅ Shipped |
+| Web dashboard — companies overview, ask with highlighted sources, track companies, live pipeline view | ✅ Shipped (Streamlit) |
+| Questions scoped automatically to the company they name | ✅ Shipped |
+| One-command start (`make up`) | ✅ Shipped |
+| AI brief per filing + PDF report | 🗺️ Roadmap (next) |
+| Watchlists, login, email alerts | 🗺️ Roadmap |
+| Compare companies; what changed vs. the last filing | 🗺️ Roadmap |
 | Production web frontend (Next.js) | 🗺️ Roadmap |
 
-**Scale so far:** ~1,000 filings discovered across a 10-ticker watchlist · 125 tests.
+**Scale so far:** ~1,000 filings discovered across a 10-ticker watchlist · 171 tests.
 
 ---
 
@@ -147,26 +153,19 @@ flowchart TB
 
 ## Running locally
 
-Everything runs on your machine; the only network calls are to SEC EDGAR (public) and the free Groq/Gemini APIs.
+Everything runs on your machine; the only network calls are to SEC EDGAR (public) and the free Groq/Gemini APIs. You need Docker Desktop.
 
 ```bash
 git clone https://github.com/aryadoshii/filingsage
 cd filingsage
-
-cp .env.example .env
-# Required: SEC_CONTACT_EMAIL (SEC fair-access policy mandates a real contact)
-# For Q&A: GROQ_API_KEY and/or GEMINI_API_KEY (both have free tiers)
-
-# For the dashboard's "Track a company" form: a shared secret for the ingest endpoint
-echo "INGEST_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" >> .env
-
-docker compose up --build -d     # migrate, api, worker, beat, ui, postgres, redis, qdrant
-docker compose ps                # services "healthy"; migrate shows "exited (0)"
+make up
 ```
 
-**Open the dashboard at <http://localhost:8501>.** Track a company on the Filings page, watch its filings move through the pipeline on the Pipeline page, then ask questions on the Ask page — every claim links to the highlighted passage it came from and to the filing on sec.gov.
+The first `make up` creates `.env` and stops so you can set `SEC_CONTACT_EMAIL` (the SEC requires a real contact) and a free `GROQ_API_KEY` and/or `GEMINI_API_KEY`. Run `make up` again: it starts Docker if needed, builds and starts every service, loads new filings and financials, and opens the dashboard at <http://localhost:8501>. The first build downloads the AI models and takes a while; later starts are quick.
 
-The schema is applied automatically by a one-shot `migrate` service before the API and worker start.
+`make down` stops everything (data is kept). `make logs`, `make ps` and `make test` do what they say.
+
+**In the dashboard:** the Companies page shows every tracked company with its headline numbers; each company's research page has key stats, revenue/income/margin charts, a full financial statement (downloadable as CSV), an 8-K events timeline, its filings, and Q&A limited to that company. Track new companies on the Filings page; watch ingestion live on the Pipeline page.
 
 **Or from the terminal** — the CLI runs inside the API container, so nothing needs installing on the host:
 

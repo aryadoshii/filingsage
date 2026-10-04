@@ -47,10 +47,12 @@ src/filingsage/
   worker/       Celery app (+ beat schedule), tasks, recovery tool
   connectors/   SourceConnector ABC + EdgarConnector
   parsing/      bronze HTML -> sectioned silver Parquet (+ DQ checks)
-  gold/         chunking, embedding, Qdrant store, retrieval, rerank, cited Q&A
+  gold/         chunking, embedding, Qdrant store, retrieval, rerank, cited Q&A, question scoping
+  financials/   XBRL companyfacts -> clean quarterly/annual series, statements, key stats
   db/           SQLAlchemy models, session, transactional event emitter
 ui/             Streamlit dashboard (own image; HTTP client of the API only)
 migrations/     Alembic
+scripts/        up.sh (behind `make up`)
 tests/          pytest (unit; testcontainers for integration)
 docs/           filingsage-spec.md (frozen) · decisions.md (decision log)
 deploy/         Fly.io configs for the paused hosted deployment
@@ -60,8 +62,9 @@ data/           local bronze/silver (gitignored)
 ## Commands
 
 ```bash
-cp .env.example .env                     # once; set SEC_CONTACT_EMAIL (+ GROQ/GEMINI keys for Q&A)
-docker compose up --build -d             # migrate (one-shot), api, worker, beat, postgres, redis, qdrant
+make up                                  # starts Docker if needed, builds + starts everything, opens http://localhost:8501
+make down / make logs / make ps / make test
+docker compose up --build -d             # what make up runs under the hood: migrate (one-shot), api, worker, beat, ui, postgres, redis, qdrant
 docker compose ps                        # services healthy; migrate "exited (0)"; beat has no healthcheck
 docker compose exec api python -m filingsage.cli ask "..." --ticker AAPL   # CLI inside the stack
 curl localhost:8000/healthz              # liveness
@@ -81,6 +84,13 @@ ruff check src tests                     # lint
 Phase 0 — local stack
 - [x] L1 — local Qdrant in Compose, auto-migrate service, payload indexes in `ensure_collection()`, Celery beat replaces the GitHub cron, host-facing `.env.example`, `.dockerignore` (decisions #30, #31)
 - [x] L1b — Streamlit dashboard at localhost:8501 (Ask with highlighted sources, Filings + track a company, live Pipeline) on new read-only API endpoints; Docker layer order fixed so code changes keep the baked-model cache (decision #32)
+
+Product track — make it a finance research site people use (agreed build order, takes priority):
+- [x] P1 — company research pages: XBRL financials (quarterly/annual, Q4 + cash-flow quarters derived and flagged), key stats, charts, statement + CSV, 8-K events timeline; companies overview home; question scoping; finance-research redesign; `make up` (decisions #33, #34)
+- [ ] P2 — AI brief per filing (cited key points, numbers, anything unusual) + risk summary + event headlines; PDF report download (spec "briefs")
+- [ ] P3 — accounts + personal watchlist home page (= L7 + L8 below)
+- [ ] P4 — email alerts with the brief when a watched company files, to Mailpit locally (= L11)
+- [ ] P5 — compare two companies; "what changed" vs the previous filing (spec v1.1 Change Detector)
 
 Phase 1 — finish the RAG stack (spec §6)
 - [ ] L2 — NLI claim verification (step 5): per-claim entailment score against cited chunks
