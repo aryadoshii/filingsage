@@ -44,8 +44,8 @@ Machine: MacBook Air (Apple Silicon → every Compose image must have an arm64 v
 ```
 src/filingsage/
   api/          FastAPI app (main.py), read-only catalog routes, Redis rate limiter
-  worker/       Celery app (+ beat schedule), tasks, recovery tool
-  connectors/   SourceConnector ABC + EdgarConnector
+  worker/       Celery app (+ beat schedule), tasks, retry policy, recovery tool + reconciler
+  connectors/   SourceConnector ABC + EdgarConnector, shared (Redis) SEC rate limiter
   parsing/      bronze HTML -> sectioned silver Parquet (+ DQ checks)
   gold/         chunking, embedding, Qdrant store, retrieval, rerank, cited Q&A, question scoping
   financials/   XBRL companyfacts -> clean quarterly/annual series, statements, key stats
@@ -68,8 +68,10 @@ docker compose up --build -d             # what make up runs under the hood: mig
 docker compose ps                        # services healthy; migrate "exited (0)"; beat has no healthcheck
 docker compose exec api python -m filingsage.cli ask "..." --ticker AAPL   # CLI inside the stack
 curl localhost:8000/healthz              # liveness
+curl localhost:8000/readyz               # readiness: Postgres / Redis / Qdrant
+docker compose exec api python -m filingsage.cli reconcile   # re-queue stuck filings now
 pip install -e ".[dev]" && pytest        # tests (integration ones need Docker running)
-ruff check src tests                     # lint
+ruff check src tests ui                  # lint
 ```
 
 ## Current status (update me)
@@ -87,6 +89,7 @@ Phase 0 — local stack
 
 Product track — make it a finance research site people use (agreed build order, takes priority):
 - [x] P1 — company research pages: XBRL financials (quarterly/annual, Q4 + cash-flow quarters derived and flagged), key stats, charts, statement + CSV, 8-K events timeline; companies overview home; question scoping; finance-research redesign; `make up` (decisions #33, #34)
+- [x] H1 hardening — internal ports on 127.0.0.1 only; one SEC rate limit shared by every process (Redis sliding window); bounded retries + `*.failed` events; reconciler for stuck filings every 30 min; `ingest.completed` heartbeat, `/readyz`, needs-attention list; model warm-up at API start (decisions #35–#37)
 - [ ] P2 — AI brief per filing (cited key points, numbers, anything unusual) + risk summary + event headlines; PDF report download (spec "briefs")
 - [ ] P3 — accounts + personal watchlist home page (= L7 + L8 below)
 - [ ] P4 — email alerts with the brief when a watched company files, to Mailpit locally (= L11)
@@ -118,4 +121,4 @@ Phase 4 — frontend (Week 5)
 
 **Definition of done (localhost edition):** on a fresh `docker compose up`, a new user signs up at localhost, adds 3 tickers, asks a cited question, receives an email brief in Mailpit when one of their companies files — while Grafana shows it happening.
 
-**Open small items:** `RERANK_SCORE_FLOOR` uncalibrated (needs eval data, L12) · `recover-stale` ignores intact-but-stuck filings · Fly worker machine still exists on the paused hosted deployment.
+**Open small items:** `RERANK_SCORE_FLOOR` uncalibrated (needs eval data, L12) · Fly worker machine still exists on the paused hosted deployment.

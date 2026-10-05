@@ -12,7 +12,7 @@ Point it at a list of tickers. It discovers every new 10-K, 10-Q, and 8-K from S
 
 | Capability | Status |
 | --- | --- |
-| SEC EDGAR ingestion (10-K / 10-Q / 8-K), rate-limited and idempotent | ✅ Shipped |
+| SEC EDGAR ingestion (10-K / 10-Q / 8-K), idempotent, one SEC rate limit shared by every process | ✅ Shipped |
 | Automated scheduled ingestion — Celery beat, every 2h | ✅ Shipped |
 | Full stack on one `docker compose up` — API, worker, scheduler, Postgres, Redis, Qdrant | ✅ Shipped |
 | Bronze → silver → gold medallion pipeline | ✅ Shipped |
@@ -22,7 +22,8 @@ Point it at a list of tickers. It discovers every new 10-K, 10-Q, and 8-K from S
 | Cited Q&A — each claim mapped to the chunks supporting it | ✅ Shipped |
 | "Never bluff" gate — insufficient evidence returns with **zero** LLM calls | ✅ Shipped |
 | Public `POST /qa` endpoint with Redis-backed rate limiting | ✅ Shipped |
-| Failure recovery tooling (`recover-stale`) | ✅ Shipped |
+| Failure handling — bounded retries with backoff, `*.failed` events, a reconciler for stuck filings, `recover-stale` | ✅ Shipped |
+| Readiness probe (`/readyz`) and pipeline health on the dashboard (last EDGAR check, needs-attention list) | ✅ Shipped |
 | NLI claim verification | 🗺️ Roadmap |
 | Confidence gate + retrieval retry | 🗺️ Roadmap |
 | LangGraph agent orchestration | 🗺️ Roadmap |
@@ -37,7 +38,7 @@ Point it at a list of tickers. It discovers every new 10-K, 10-Q, and 8-K from S
 | Compare companies; what changed vs. the last filing | 🗺️ Roadmap |
 | Production web frontend (Next.js) | 🗺️ Roadmap |
 
-**Scale so far:** ~1,000 filings discovered across a 10-ticker watchlist · 171 tests.
+**Scale so far:** ~1,000 filings discovered across a 10-ticker watchlist · 245 tests.
 
 ---
 
@@ -181,12 +182,16 @@ curl -s localhost:8000/qa -H "Content-Type: application/json" \
 
 Beat re-runs ingestion for the default 10-ticker universe every two hours on its own. Qdrant's dashboard is at <http://localhost:6333/dashboard>.
 
-**Recover from data loss** (rebuilds anything whose local files are gone, from EDGAR):
+**Health and recovery:**
 
 ```bash
-docker compose exec worker python -m filingsage.cli recover-stale --dry-run
+curl -s localhost:8000/readyz      # Postgres / Redis / Qdrant: 200 when all answer, 503 naming what's down
+docker compose exec api python -m filingsage.cli reconcile    # re-queue stuck filings now (beat does it every 30 min)
+docker compose exec worker python -m filingsage.cli recover-stale --dry-run   # after data loss: rebuild from EDGAR
 docker compose exec worker python -m filingsage.cli recover-stale
 ```
+
+Postgres, Redis, Qdrant and the API listen on `127.0.0.1` only; the dashboard (8501) is reachable from your LAN.
 
 **Tests** (host-side, Python 3.12+):
 
@@ -194,7 +199,7 @@ docker compose exec worker python -m filingsage.cli recover-stale
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest              # integration tests use testcontainers and need Docker running
-ruff check src tests
+ruff check src tests ui
 ```
 
 ---
@@ -208,9 +213,10 @@ Every non-obvious choice here is documented with its reasoning, the alternative 
 - **Hand-rolled rate limiter over `tenacity`** — ~25 lines, fully explainable, with SEC-specific behavior (403 as throttle signal, `Retry-After` honored, jitter).
 - **Both spec-named models were swapped after verification, not assumption** — Groq's `llama-3.3-70b-versatile` had been deprecated; `bge-reranker-base` measured at ~2GB to load, over twice the available budget. Both replacements were checked against real docs and real memory numbers first.
 - **Measured before fixing, and the intuitive fix was wrong** — an OOM looked like "two models resident at once." Measuring showed the sparse model costs 0.2MB; FastEmbed's BM25 isn't a neural model at all. The obvious fix would have saved nothing.
+- **One SEC budget for every process, as a sliding window** — each worker process had its own 8 req/s limiter, so two together could exceed SEC's 10 req/s. The shared limiter lives in Redis; a per-second counter was rejected because it lets a full budget through on each side of a second boundary — 2 × 8 = 16 requests within a fraction of a second.
 - **A rate limiter that didn't limit anything** — forging `X-Forwarded-For` against the live deployment showed Fly *prepends* rather than replaces, making the limit bypassable by anyone setting a header. `Fly-Client-IP` proved unspoofable under the same test.
 
-📄 **[Full decision log →](docs/decisions.md)** — all 31 entries, including the production incidents and what they cost to learn.
+📄 **[Full decision log →](docs/decisions.md)** — all 37 entries, including the production incidents and what they cost to learn.
 
 ---
 
