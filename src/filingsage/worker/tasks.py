@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from filingsage.config import get_settings
 from filingsage.connectors import EdgarClient, EdgarConnector, FilingRef
+from filingsage.connectors.rate_limit import shared_edgar_limiter
 from filingsage.db.events import emit_event
 from filingsage.db.models import Chunk as ChunkRow
 from filingsage.db.models import Company, Filing, FilingStatus
@@ -45,9 +46,15 @@ PERIODIC_FORMS = frozenset({"10-K", "10-Q"})
 
 
 def _connector() -> EdgarConnector:
-    """Construction seam: tests monkeypatch this instead of building a real client."""
+    """Construction seam: tests monkeypatch this instead of building a real client.
+
+    The rate limiter is the process-wide shared one (Redis-backed), not a
+    fresh per-client limiter: every task builds a new client, and every
+    worker process runs tasks, so only a shared budget keeps the combined
+    rate under SEC's cap (decision #36).
+    """
     settings = get_settings()
-    client = EdgarClient(contact_email=settings.sec_contact_email)
+    client = EdgarClient(contact_email=settings.sec_contact_email, limiter=shared_edgar_limiter())
     return EdgarConnector(client, bronze_dir=settings.bronze_dir)
 
 

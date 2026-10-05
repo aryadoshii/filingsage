@@ -2,7 +2,8 @@
 
 Fair-access compliance (SEC policy, non-negotiable):
   * declared User-Agent carrying a real contact email
-  * request rate capped well below SEC's 10 req/s ceiling
+  * request rate capped well below SEC's 10 req/s ceiling — across every
+    process at once when a shared limiter is injected (connectors/rate_limit.py)
   * exponential backoff on 403/429/5xx (SEC signals throttling with 403)
 """
 
@@ -14,6 +15,7 @@ import time
 from collections.abc import Callable, Sequence
 from datetime import date
 from pathlib import Path
+from typing import Protocol
 
 import httpx
 
@@ -35,24 +37,41 @@ class UnknownTickerError(LookupError):
     """Ticker not present in SEC's company_tickers.json mapping."""
 
 
+class Limiter(Protocol):
+    """Anything EdgarClient can call before each request: block until one
+    more request is allowed."""
+
+    def wait(self) -> None: ...
+
+
 class RateLimiter:
     """Min-interval limiter: guarantees <= max_per_second across sequential calls.
 
     Hand-rolled (~10 lines) instead of a library: single-process sequential
-    polling needs nothing fancier, and every line is explainable. `sleep` is
-    injectable so tests run instantly.
+    polling needs nothing fancier, and every line is explainable. `sleep`
+    and `clock` are injectable so tests run instantly.
+
+    Per-process only — two processes each holding one can together exceed
+    the rate. The pipeline uses connectors/rate_limit.py's shared limiter,
+    which falls back to this one when Redis is unreachable.
     """
 
-    def __init__(self, max_per_second: float, sleep: Callable[[float], None] = time.sleep):
+    def __init__(
+        self,
+        max_per_second: float,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self._interval = 1.0 / max_per_second
         self._sleep = sleep
+        self._clock = clock
         self._next_ok = 0.0
 
     def wait(self) -> None:
-        delay = self._next_ok - time.monotonic()
+        delay = self._next_ok - self._clock()
         if delay > 0:
             self._sleep(delay)
-        self._next_ok = max(time.monotonic(), self._next_ok) + self._interval
+        self._next_ok = max(self._clock(), self._next_ok) + self._interval
 
 
 class EdgarClient:
@@ -69,13 +88,17 @@ class EdgarClient:
         max_retries: int = 5,
         transport: httpx.BaseTransport | None = None,  # test seam
         sleep: Callable[[float], None] = time.sleep,   # test seam
+        limiter: Limiter | None = None,  # e.g. the cross-process shared limiter
     ):
         if not contact_email or "example.com" in contact_email or contact_email.startswith("change-me"):
             raise ValueError(
                 "SEC_CONTACT_EMAIL must be a real contact address before any EDGAR "
                 "request is made (SEC fair-access policy). Set it in .env."
             )
-        self._limiter = RateLimiter(max_per_second, sleep=sleep)
+        # Without an injected limiter, an in-process one at max_per_second —
+        # right for a single process (tests, one-off scripts), not for the
+        # pipeline, whose processes must share one budget.
+        self._limiter = limiter or RateLimiter(max_per_second, sleep=sleep)
         self._sleep = sleep
         self._max_retries = max_retries
         self._client = httpx.Client(

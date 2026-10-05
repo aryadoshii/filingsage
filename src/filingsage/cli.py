@@ -7,6 +7,7 @@ from datetime import date
 
 from filingsage.config import get_settings
 from filingsage.connectors import EdgarClient, EdgarConnector, FilingRef
+from filingsage.connectors.rate_limit import shared_edgar_limiter
 from filingsage.gold.qa import answer_question, resolve_citations
 from filingsage.gold.retrieval import search
 from filingsage.parsing.silver import ParseQuarantineError, parse_to_silver
@@ -19,8 +20,10 @@ from filingsage.worker.tasks import ingest_watchlist, refresh_company
 
 
 def _build_connector() -> EdgarConnector:
+    """Same shared EDGAR budget as the worker: a CLI run while the pipeline is
+    busy counts against the one global rate, not a fresh one of its own."""
     settings = get_settings()
-    client = EdgarClient(contact_email=settings.sec_contact_email)
+    client = EdgarClient(contact_email=settings.sec_contact_email, limiter=shared_edgar_limiter())
     return EdgarConnector(client, bronze_dir=settings.bronze_dir)
 
 
