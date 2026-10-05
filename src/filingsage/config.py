@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     # uncapped, a long first embedding run on a laptop).
     ingest_limit_per_ticker: int = 20
 
+    # Load the embedding + reranker models in a background thread when the
+    # API starts, so the first question doesn't pay for it. Tests turn it
+    # off (tests/conftest.py) — they must never load models.
+    warm_models_on_startup: bool = True
+
     # Local data lake root (gitignored). Prod uses R2 — same layout, different root.
     data_dir: Path = Path("data")
 

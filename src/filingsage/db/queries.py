@@ -163,6 +163,23 @@ class PipelineStats:
     chunks: int
     embedded_chunks: int
     last_event_at: datetime | None
+    # Heartbeats: written on every run, so a stale value means the scheduler
+    # (or the reconciler) stopped — not merely that nothing new happened.
+    last_ingest_at: datetime | None
+    last_reconcile_at: datetime | None
+    needs_attention: int
+    quarantined: int
+
+
+def _last_event_at(session: Session, event_type: str) -> datetime | None:
+    return session.scalar(select(func.max(Event.created_at)).where(Event.type == event_type))
+
+
+def _attention_filter(failed):
+    return (
+        Filing.status.in_(IN_PROGRESS_STATUSES),
+        failed.c.failures >= NEEDS_ATTENTION_FAILURES,
+    )
 
 
 def pipeline_stats(session: Session) -> PipelineStats:
@@ -172,6 +189,13 @@ def pipeline_stats(session: Session) -> PipelineStats:
     chunks, embedded_chunks = session.execute(
         select(func.count(Chunk.id), func.count(Chunk.qdrant_point_id))
     ).one()
+    failed = failed_runs()
+    needs_attention = session.scalar(
+        select(func.count())
+        .select_from(Filing)
+        .join(failed, failed.c.accession_no == Filing.accession_no)
+        .where(*_attention_filter(failed))
+    )
     return PipelineStats(
         filings_by_status=by_status,
         total_filings=sum(by_status.values()),
@@ -179,7 +203,68 @@ def pipeline_stats(session: Session) -> PipelineStats:
         chunks=chunks,
         embedded_chunks=embedded_chunks,
         last_event_at=session.scalar(select(func.max(Event.created_at))),
+        last_ingest_at=_last_event_at(session, "ingest.completed"),
+        last_reconcile_at=_last_event_at(session, "pipeline.reconciled"),
+        needs_attention=needs_attention or 0,
+        quarantined=by_status.get(FilingStatus.QUARANTINED.value, 0),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class AttentionRow:
+    ticker: str
+    company: str
+    form_type: str
+    filed_at: date
+    accession_no: str
+    status: str
+    failures: int          # filing.failed events: runs that gave up
+    attempts: int          # tries across all of those runs
+    last_error: str | None
+    last_failed_at: datetime
+    edgar_url: str
+
+
+def needs_attention(session: Session, *, limit: int = 50) -> list[AttentionRow]:
+    """Filings the reconciler has stopped retrying (NEEDS_ATTENTION_FAILURES
+    or more failed runs, still not embedded), most recently failed first,
+    with the error from their latest failure."""
+    failed = failed_runs()
+    rows = session.execute(
+        select(
+            Filing.accession_no, Filing.form_type, Filing.filed_at, Filing.status,
+            Filing.cik, Filing.primary_document, Company.ticker, Company.name,
+            failed.c.failures, failed.c.last_failed_at,
+        )
+        .join(failed, failed.c.accession_no == Filing.accession_no)
+        .join(Company, Company.cik == Filing.cik)
+        .where(*_attention_filter(failed))
+        .order_by(failed.c.last_failed_at.desc(), Filing.id)
+        .limit(limit)
+    ).all()
+
+    last_error: dict[str, str | None] = {}
+    attempts: dict[str, int] = {}
+    for event in session.scalars(
+        select(Event)
+        .where(Event.type == "filing.failed", Event.entity_id.in_([r.accession_no for r in rows]))
+        .order_by(Event.id)
+    ):
+        last_error[event.entity_id] = event.payload_json.get("error")
+        attempts[event.entity_id] = attempts.get(event.entity_id, 0) + int(
+            event.payload_json.get("attempts", 1)
+        )
+
+    return [
+        AttentionRow(
+            ticker=r.ticker, company=r.name, form_type=r.form_type, filed_at=r.filed_at,
+            accession_no=r.accession_no, status=r.status, failures=r.failures,
+            attempts=attempts.get(r.accession_no, r.failures),
+            last_error=last_error.get(r.accession_no), last_failed_at=r.last_failed_at,
+            edgar_url=edgar_document_url(r.cik, r.accession_no, r.primary_document),
+        )
+        for r in rows
+    ]
 
 
 @dataclass(frozen=True, slots=True)

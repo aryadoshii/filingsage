@@ -2,13 +2,20 @@
 
 import logging
 import secrets
+import threading
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import asynccontextmanager
 from datetime import date
+from functools import lru_cache
 from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from redis import Redis
+from sqlalchemy import select, text
 
 from filingsage import __version__
 from filingsage.api.catalog import router as catalog_router
@@ -19,13 +26,32 @@ from filingsage.api.rate_limit import (
 )
 from filingsage.config import get_settings
 from filingsage.db.models import Company
-from filingsage.db.session import session_scope
+from filingsage.db.session import get_engine, session_scope
+from filingsage.gold import rerank
+from filingsage.gold.embedding import embed_texts
 from filingsage.gold.qa import Answer, answer_question
 from filingsage.gold.scope import detect_ticker
-from filingsage.gold.vector_store import ensure_collection
+from filingsage.gold.vector_store import COLLECTION_NAME, ensure_collection, get_client
+from filingsage.redis_client import redis_from_url
 from filingsage.worker.tasks import ingest_watchlist
 
 logger = logging.getLogger(__name__)
+
+
+def _configure_logging() -> None:
+    """uvicorn configures only its own loggers, so INFO lines from
+    filingsage.* (the warm-up timing, the EDGAR limiter's recovery notice)
+    were silently dropped. One handler on the package logger fixes that
+    without touching uvicorn's own output."""
+    package = logging.getLogger("filingsage")
+    if not package.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s - %(message)s"))
+        package.addHandler(handler)
+        package.setLevel(logging.INFO)
+
+
+_configure_logging()
 
 
 @asynccontextmanager
@@ -40,7 +66,28 @@ async def lifespan(app: FastAPI):
         RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_SECONDS,
     )
     _ensure_vector_store()
+    if get_settings().warm_models_on_startup:
+        threading.Thread(target=_warm_models, name="model-warmup", daemon=True).start()
     yield
+
+
+def _warm_models() -> None:
+    """Load the embedding and reranker models with one tiny call each, in a
+    background thread: startup isn't held up, /healthz answers immediately,
+    and the first real question no longer pays the model-load cost on top
+    of retrieval and the LLM call. The duration is measured and logged
+    rather than assumed. Best-effort: on failure the first question simply
+    loads the models itself, as before."""
+    started = time.perf_counter()
+    try:
+        embed_texts(["warm-up"])
+        rerank.warm_up()
+    except Exception:
+        logger.warning("startup: model warm-up failed; the first question will load them",
+                       exc_info=True)
+        return
+    logger.info("startup: embedding + reranker models warmed in %.1fs",
+                time.perf_counter() - started)
 
 
 def _ensure_vector_store() -> None:
@@ -77,11 +124,71 @@ def healthz() -> dict:
 
     Deliberately does NOT check Postgres/Redis — that's a readiness concern,
     and conflating the two makes orchestrators restart a healthy app because
-    a dependency blipped. A /readyz with dependency checks lands with the
-    DB layer in Week 1.
+    a dependency blipped. Dependency checks live in /readyz below; Compose's
+    healthcheck keeps using this one for exactly that reason.
     """
     settings = get_settings()
     return {"status": "ok", "service": "filingsage-api", "version": __version__, "env": settings.env}
+
+
+# Each dependency check gets this long; together they run in parallel, so
+# /readyz answers in about this long even when something hangs.
+READINESS_TIMEOUT_SECONDS = 2.0
+
+
+@lru_cache(maxsize=1)
+def _readiness_redis() -> Redis:
+    return redis_from_url(
+        get_settings().redis_url, socket_connect_timeout=1.0, socket_timeout=1.0
+    )
+
+
+def _check_postgres() -> None:
+    with get_engine().connect() as conn:
+        conn.execute(text("SELECT 1"))
+
+
+def _check_redis() -> None:
+    _readiness_redis().ping()
+
+
+def _check_qdrant() -> None:
+    if not get_client().collection_exists(COLLECTION_NAME):
+        raise RuntimeError(f"collection {COLLECTION_NAME!r} does not exist")
+
+
+READINESS_CHECKS: dict[str, Callable[[], None]] = {
+    "postgres": _check_postgres,
+    "redis": _check_redis,
+    "qdrant": _check_qdrant,
+}
+
+
+@app.get("/readyz", tags=["ops"])
+def readyz() -> JSONResponse:
+    """Readiness: can this API do real work right now? Checks Postgres
+    (SELECT 1), Redis (PING) and Qdrant (the collection exists), in
+    parallel, each bounded by READINESS_TIMEOUT_SECONDS — a hung dependency
+    makes this answer "down", never makes it hang. 200 when all pass, 503
+    with the failing ones marked "down". Error details go to the log, not
+    the response (same rule as /qa: no internals to callers)."""
+    pool = ThreadPoolExecutor(max_workers=len(READINESS_CHECKS), thread_name_prefix="readyz")
+    futures = {name: pool.submit(check) for name, check in READINESS_CHECKS.items()}
+    wait(futures.values(), timeout=READINESS_TIMEOUT_SECONDS)
+    pool.shutdown(wait=False, cancel_futures=True)  # don't wait on a hung check
+
+    results: dict[str, str] = {}
+    for name, future in futures.items():
+        if not future.done():
+            logger.warning("readyz: %s check timed out after %.1fs", name, READINESS_TIMEOUT_SECONDS)
+            results[name] = "down"
+        elif (exc := future.exception()) is not None:
+            logger.warning("readyz: %s check failed: %s: %s", name, type(exc).__name__, exc)
+            results[name] = "down"
+        else:
+            results[name] = "ok"
+    ok = all(v == "ok" for v in results.values())
+    return JSONResponse(results, status_code=200 if ok else 503)
 
 
 class IngestRequest(BaseModel):

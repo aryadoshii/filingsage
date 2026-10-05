@@ -63,6 +63,12 @@ def _reranker() -> TextCrossEncoder:
     return TextCrossEncoder(model_name=RERANK_MODEL)
 
 
+def warm_up() -> None:
+    """Load the cross-encoder and score one tiny pair, so the ONNX session
+    is initialised before the first real question (API startup)."""
+    list(_reranker().rerank("warm-up", ["warm-up"]))
+
+
 def rerank(query: str, chunks: list[SearchResult], *, top_k: int = 8) -> list[SearchResult]:
     """Cross-encoder rerank of `chunks` against `query`; returns the top_k
     by rerank score, descending.

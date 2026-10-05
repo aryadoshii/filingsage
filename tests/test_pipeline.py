@@ -308,7 +308,7 @@ def test_qdrant_failure_on_a_later_batch_leaves_status_not_embedded(wire_connect
     # ...and the failure itself is on record, in its own transaction, which
     # the rollback above didn't take with it. RuntimeError isn't transient,
     # so there was exactly one attempt.
-    assert _failures(accession_no) == [
+    assert _payloads(accession_no) == [
         {"step": "embed", "error": "RuntimeError: simulated Qdrant upsert failure", "attempts": 1}
     ]
 
@@ -386,7 +386,8 @@ def test_status_change_and_event_commit_or_rollback_together():
 # --- retries and failure events (decision #37) --------------------------------
 
 
-def _failures(entity_id: str, event_type: str = "filing.failed") -> list[dict]:
+def _payloads(entity_id: str, event_type: str = "filing.failed") -> list[dict]:
+    """Payloads of one entity's events of one type, oldest first."""
     with db_session.session_scope() as session:
         return [
             e.payload_json
@@ -426,7 +427,7 @@ def test_a_transient_fetch_error_is_retried_and_the_chain_completes(wire_connect
 
     assert handler.archive_requests == 2  # failed once, retried once
     assert _status(accession_no) == FilingStatus.EMBEDDED.value
-    assert _failures(accession_no) == []  # a recovered retry isn't a failure
+    assert _payloads(accession_no) == []  # a recovered retry isn't a failure
 
 
 def test_a_fetch_that_keeps_failing_records_one_event_after_the_last_retry(
@@ -442,7 +443,7 @@ def test_a_fetch_that_keeps_failing_records_one_event_after_the_last_retry(
     tasks.ingest_watchlist(["ACME"], limit=None)
 
     assert handler.archive_requests == MAX_RETRIES + 1
-    assert _failures(accession_no) == [
+    assert _payloads(accession_no) == [
         {"step": "fetch", "error": "ConnectError: network is unreachable", "attempts": MAX_RETRIES + 1}
     ]
     assert _status(accession_no) == FilingStatus.DISCOVERED.value  # left for the reconciler
@@ -460,7 +461,7 @@ def test_a_non_transient_fetch_error_fails_once_without_retrying(wire_connector)
         tasks.ingest_watchlist(["ACME"], limit=None)
 
     assert handler.archive_requests == 1
-    [failure] = _failures(accession_no)
+    [failure] = _payloads(accession_no)
     assert (failure["step"], failure["attempts"]) == ("fetch", 1)
     assert failure["error"].startswith("HTTPStatusError: Client error '404 Not Found'")
 
@@ -484,7 +485,7 @@ def test_a_parse_crash_is_recorded_without_touching_the_status(wire_connector, t
     with pytest.raises(FileNotFoundError):
         tasks.parse_filing.delay(accession_no)
 
-    [failure] = _failures(accession_no)
+    [failure] = _payloads(accession_no)
     assert (failure["step"], failure["attempts"]) == ("parse", 1)
     assert failure["error"].startswith("FileNotFoundError:")
     assert _status(accession_no) == FilingStatus.FETCHED.value
@@ -496,6 +497,23 @@ def test_a_discovery_failure_records_an_ingest_failed_event(wire_connector):
     with pytest.raises(UnknownTickerError):
         tasks.ingest_watchlist(["NOPE"], limit=None)
 
-    last = _failures("watchlist", "ingest.failed")[-1]
+    last = _payloads("watchlist", "ingest.failed")[-1]
     assert (last["step"], last["attempts"], last["tickers"]) == ("ingest", 1, 1)
     assert last["error"].startswith("UnknownTickerError:")
+
+
+def test_every_ingest_run_leaves_a_heartbeat_even_with_nothing_new(wire_connector):
+    """ingest.completed on every run is what lets /stats tell "EDGAR had
+    nothing new" apart from "the scheduler stopped"."""
+    accession_no = "0000900001-26-000030"
+    wire_connector(
+        _submissions([accession_no], ["8-K"], ["2026-06-30"], ["a.htm"]), {accession_no: HAPPY_8K}
+    )
+
+    tasks.ingest_watchlist(["ACME"], limit=None)
+    tasks.ingest_watchlist(["ACME"], limit=None)  # nothing new the second time
+
+    assert _payloads("watchlist", "ingest.completed")[-2:] == [
+        {"tickers": 1, "discovered": 1, "inserted": 1},
+        {"tickers": 1, "discovered": 1, "inserted": 0},
+    ]

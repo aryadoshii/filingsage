@@ -227,6 +227,14 @@ def _discover_and_insert(
             if company.financials_updated_at is None or company.financials_updated_at < stale_before:
                 refresh_ciks.add(company.cik)
 
+        # Heartbeat on EVERY run, new filings or not: without it, "EDGAR had
+        # nothing new" and "the scheduler stopped" look identical (/stats'
+        # last_ingest_at). Same transaction as the inserts it summarises.
+        emit_event(
+            session, "ingest.completed", "watchlist",
+            {"tickers": len(tickers), "discovered": len(refs), "inserted": len(newly_inserted)},
+        )
+
     return newly_inserted, refresh_ciks, len(refs)
 
 

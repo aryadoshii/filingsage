@@ -58,6 +58,24 @@ class StatsOut(BaseModel):
     chunks: int
     embedded_chunks: int
     last_event_at: datetime | None
+    last_ingest_at: datetime | None       # latest ingest.completed: "last checked EDGAR"
+    last_reconcile_at: datetime | None    # latest pipeline.reconciled
+    needs_attention: int                  # stuck filings that failed 3+ times
+    quarantined: int
+
+
+class AttentionOut(BaseModel):
+    ticker: str
+    company: str
+    form_type: str
+    filed_at: date
+    accession_no: str
+    status: str
+    failures: int
+    attempts: int
+    last_error: str | None
+    last_failed_at: datetime
+    edgar_url: str
 
 
 class EventOut(BaseModel):
@@ -103,6 +121,16 @@ def get_filings(
 def get_stats() -> StatsOut:
     with session_scope() as session:
         return StatsOut(**asdict(queries.pipeline_stats(session)))
+
+
+@router.get("/filings/needs-attention")
+def get_needs_attention(
+    limit: int = Query(default=50, ge=1, le=MAX_LIST_LIMIT),
+) -> list[AttentionOut]:
+    """Filings the pipeline has given up retrying (decision #37), with the
+    error from their latest failure — what someone has to look at."""
+    with session_scope() as session:
+        return [AttentionOut(**asdict(row)) for row in queries.needs_attention(session, limit=limit)]
 
 
 @router.get("/events")
