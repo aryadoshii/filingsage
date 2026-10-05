@@ -20,6 +20,33 @@ from filingsage.db.models import Chunk, Company, Event, Filing, FilingStatus, Fi
 
 EDGAR_ARCHIVES = "https://www.sec.gov/Archives/edgar/data"
 
+# A filing whose pipeline step has given up this many times (each a full
+# run of retries, decision #37) is no longer retried automatically: the
+# reconciler skips it and the dashboard lists it as needing attention.
+NEEDS_ATTENTION_FAILURES = 3
+IN_PROGRESS_STATUSES = (
+    FilingStatus.DISCOVERED.value,
+    FilingStatus.FETCHED.value,
+    FilingStatus.PARSED.value,
+)
+
+
+def failed_runs():
+    """Subquery: accession_no -> how many filing.failed events it has, plus
+    the newest one's time. Shared by the reconciler (which skips filings at
+    the threshold) and the dashboard (which lists them), so both agree on
+    what "needs attention" means."""
+    return (
+        select(
+            Event.entity_id.label("accession_no"),
+            func.count(Event.id).label("failures"),
+            func.max(Event.created_at).label("last_failed_at"),
+        )
+        .where(Event.type == "filing.failed")
+        .group_by(Event.entity_id)
+        .subquery()
+    )
+
 
 def edgar_document_url(cik: int, accession_no: str, primary_document: str) -> str:
     """The filing's primary document on sec.gov — what a citation links to.

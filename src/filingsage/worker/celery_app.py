@@ -16,7 +16,9 @@ celery_app = Celery(
     "filingsage",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["filingsage.worker.tasks"],
+    # recovery.py defines the reconciler task; it imports tasks.py, so it
+    # can't live there without a circular import.
+    include=["filingsage.worker.tasks", "filingsage.worker.recovery"],
 )
 
 celery_app.conf.update(
@@ -66,6 +68,13 @@ celery_app.conf.update(
         "scheduled-ingest-every-2h": {
             "task": "filingsage.scheduled_ingest",
             "schedule": crontab(minute=17, hour="*/2"),
+        },
+        # Decision #37: re-enqueue filings that stopped making progress. Its
+        # stuck threshold is also 30 minutes, so a filing is picked up at
+        # most ~an hour after it stalled.
+        "reconcile-pipeline-every-30m": {
+            "task": "filingsage.reconcile_pipeline",
+            "schedule": crontab(minute="*/30"),
         },
     },
     timezone="UTC",

@@ -14,6 +14,7 @@ from filingsage.parsing.silver import ParseQuarantineError, parse_to_silver
 from filingsage.worker.recovery import (
     RECOVERY_BATCH_DELAY_SECONDS,
     RECOVERY_BATCH_SIZE,
+    reconcile_stuck_filings,
     recover_stale_filings,
 )
 from filingsage.worker.tasks import ingest_watchlist, refresh_company
@@ -134,6 +135,17 @@ def cmd_recover_stale(args: argparse.Namespace) -> None:
         )
 
 
+def cmd_reconcile(args: argparse.Namespace) -> None:
+    """Run the reconciler once now — the same pass beat runs every 30 min."""
+    result = reconcile_stuck_filings()
+    print(f"Re-queued {len(result.requeued)} stuck filing(s)"
+          + (f" ({len(result.reset)} reset to re-download: file missing on disk)." if result.reset else "."))
+    if result.needs_attention:
+        print(f"{result.needs_attention} filing(s) need attention: failed 3+ times, not retried.")
+    if result.remaining:
+        print(f"{result.remaining} more stuck filing(s) left for the next run (cap per run).")
+
+
 def cmd_refresh_company(args: argparse.Namespace) -> None:
     """Rebuild a company's profile + XBRL financials now, in this process
     (the worker does the same automatically after a new 10-K/10-Q)."""
@@ -247,6 +259,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         help=f"Seconds to wait between batches (default {RECOVERY_BATCH_DELAY_SECONDS:.0f})",
     )
     p_recover.set_defaults(func=cmd_recover_stale)
+
+    p_reconcile = sub.add_parser(
+        "reconcile",
+        help=(
+            "Re-enqueue filings stuck for 30+ minutes (what beat runs every 30 min) — "
+            "see docs/decisions.md #37"
+        ),
+    )
+    p_reconcile.set_defaults(func=cmd_reconcile)
 
     p_refresh = sub.add_parser(
         "refresh-company",
