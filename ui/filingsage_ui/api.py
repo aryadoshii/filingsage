@@ -45,8 +45,16 @@ class FilingSageClient:
     # -- plumbing -----------------------------------------------------------
 
     def _request(
-        self, method: str, path: str, *, timeout: httpx.Timeout = READ_TIMEOUT, **kwargs: Any
+        self,
+        method: str,
+        path: str,
+        *,
+        timeout: httpx.Timeout = READ_TIMEOUT,
+        accept: tuple[int, ...] = (),
+        **kwargs: Any,
     ) -> Any:
+        """`accept`: error statuses whose JSON body is the answer, not a
+        failure (/readyz says which dependency is down in its 503)."""
         try:
             with httpx.Client(
                 base_url=self.base_url, timeout=timeout, transport=self._transport
@@ -63,6 +71,8 @@ class FilingSageClient:
                 "with `docker compose ps`."
             ) from None
 
+        if resp.status_code in accept:
+            return resp.json()
         if resp.status_code == 429:
             raise ApiError("Too many questions in a short time. Wait a minute and ask again.")
         if resp.status_code == 503:
@@ -79,6 +89,14 @@ class FilingSageClient:
 
     def stats(self) -> dict:
         return self._request("GET", "/stats")
+
+    def readiness(self) -> dict:
+        """{"postgres": "ok"|"down", "redis": ..., "qdrant": ...} — returned
+        as-is whether the API reports ready (200) or not (503)."""
+        return self._request("GET", "/readyz", accept=(503,))
+
+    def needs_attention(self, *, limit: int = 50) -> list[dict]:
+        return self._request("GET", "/filings/needs-attention", params={"limit": limit})
 
     def companies(self) -> list[dict]:
         return self._request("GET", "/companies")

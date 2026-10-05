@@ -194,3 +194,96 @@ def test_recent_filings_are_flagged_for_a_week():
     assert fmt.is_recent("2026-10-01", today=date(2026, 10, 4))
     assert not fmt.is_recent("2026-09-20", today=date(2026, 10, 4))
     assert not fmt.is_recent(None)
+
+
+# --- pipeline health: event labels, dependency status, new client calls ------
+
+_SRC = __import__("pathlib").Path(__file__).resolve().parent.parent / "src" / "filingsage"
+
+
+def _emitted_event_types() -> set[str]:
+    """Every event type string the backend source mentions in quotes."""
+    import re
+
+    pattern = re.compile(r'"((?:filing|company|ingest|pipeline)\.[a-z_]+)"')
+    return {m for path in _SRC.rglob("*.py") for m in pattern.findall(path.read_text())}
+
+
+def test_every_event_the_backend_emits_has_a_plain_language_label():
+    """'Nothing raw like "company.refreshed" may appear in the UI' — checked
+    against the backend's own source, so a new event type can't slip in."""
+    types = _emitted_event_types()
+    assert {"company.refreshed", "filing.failed", "pipeline.reconciled"} <= types  # scan works
+    for event_type in types:
+        label = fmt.event_label(event_type, {"step": "fetch"})
+        assert "." not in label and "_" not in label, f"{event_type} shows as {label!r}"
+
+
+def test_new_event_labels():
+    assert fmt.event_label("company.refreshed") == "Financials refreshed"
+    assert fmt.event_label("company.refresh_failed") == "Financials refresh failed"
+    assert fmt.event_label("ingest.completed") == "Checked EDGAR"
+    assert fmt.event_label("filing.requeued") == "Retried"
+    assert fmt.event_label("pipeline.reconciled") == "Checked for stuck filings"
+    assert fmt.event_label("filing.failed", {"step": "fetch"}) == "Failed at download"
+    assert fmt.event_label("filing.failed", {"step": "embed"}) == "Failed at indexing"
+    # An event type the dashboard doesn't know yet still reads as words.
+    assert fmt.event_label("analysis.completed") == "Analysis completed"
+
+
+def test_new_event_details():
+    def detail(kind: str, payload: dict) -> str:
+        return fmt.event_detail({"type": kind, "payload": payload})
+
+    assert detail("company.refreshed", {"facts": 412}) == "412 financial facts"
+    assert detail("ingest.completed", {"inserted": 1}) == "1 new filing"
+    assert detail("ingest.completed", {"inserted": 0}) == "0 new filings"
+    assert detail("filing.failed", {"error": "ConnectError: down", "attempts": 5}) == (
+        "ConnectError: down (after 5 attempts)"
+    )
+    assert detail("company.refresh_failed", {"error": "HTTPStatusError: 404", "attempts": 1}) == (
+        "HTTPStatusError: 404"
+    )
+    assert detail("filing.requeued", {"from_status": "parsed"}) == "Was stuck at: Parsed"
+    assert detail("filing.recovery_reset", {"reason": "bronze missing on disk"}).startswith(
+        "Downloaded file was missing"
+    )
+    assert detail("pipeline.reconciled", {"requeued": 0}) == "Nothing stuck"
+    assert detail("pipeline.reconciled", {"requeued": 3, "needs_attention": 1}) == (
+        "3 stuck filings retried; 1 need attention"
+    )
+
+
+def test_event_subjects_name_groups_in_words():
+    assert fmt.event_subject({"entity_id": "watchlist"}) == "All tracked companies"
+    assert fmt.event_subject({"entity_id": "pipeline"}) == "All filings"
+    assert fmt.event_subject({"entity_id": "AAPL"}) == "AAPL"
+
+
+def test_dependency_status_treats_anything_but_ok_as_down():
+    assert fmt.dependency_status({"postgres": "ok", "redis": "down"}) == [
+        ("Postgres", True), ("Redis", False), ("Qdrant", False),  # unreported = down
+    ]
+
+
+def test_readiness_returns_the_body_even_when_the_api_says_not_ready():
+    body = {"postgres": "ok", "redis": "down", "qdrant": "ok"}
+    api = _client(lambda request: httpx.Response(503, json=body))
+    assert api.readiness() == body
+
+
+def test_a_503_from_other_endpoints_is_still_an_error():
+    api = _client(lambda request: httpx.Response(503, json={"detail": "Q&A is unavailable."}))
+    with pytest.raises(ApiError):
+        api.stats()
+
+
+def test_needs_attention_calls_its_endpoint():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, dict(request.url.params)))
+        return httpx.Response(200, json=[])
+
+    assert _client(handler).needs_attention(limit=10) == []
+    assert seen == [("/filings/needs-attention", {"limit": "10"})]

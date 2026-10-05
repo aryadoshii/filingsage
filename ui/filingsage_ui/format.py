@@ -135,15 +135,80 @@ EVENT_LABELS: dict[str, str] = {
     "filing.parsed": "Split into sections",
     "filing.embedded": "Made searchable",
     "filing.parse_failed": "Couldn't parse",
+    "filing.requeued": "Retried",
+    "filing.recovery_reset": "Restarted from download",
+    "company.refreshed": "Financials refreshed",
+    "company.refresh_failed": "Financials refresh failed",
+    "ingest.completed": "Checked EDGAR",
+    "ingest.failed": "Couldn't check EDGAR",
+    "pipeline.reconciled": "Checked for stuck filings",
+    # filing.failed is labelled from its payload: "Failed at <step>".
+}
+
+# The pipeline step a failure event names -> the word a reader uses for it.
+STEP_LABELS: dict[str, str] = {
+    "fetch": "download",
+    "parse": "parsing",
+    "embed": "indexing",
+    "refresh": "financials refresh",
+    "ingest": "EDGAR check",
+}
+
+# Why the reconciler restarted a filing, in place of storage-layer jargon.
+RESET_REASONS: dict[str, str] = {
+    "bronze missing on disk": "Downloaded file was missing, so it's being downloaded again",
+    "silver missing on disk": "Parsed file was missing, so it's being processed again",
+}
+
+# Event entity ids that aren't a filing or a ticker.
+EVENT_SUBJECTS: dict[str, str] = {
+    "watchlist": "All tracked companies",
+    "pipeline": "All filings",
 }
 
 
-def event_label(event_type: str) -> str:
-    return EVENT_LABELS.get(event_type, event_type)
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def event_label(event_type: str, payload: dict | None = None) -> str:
+    """What happened, in plain words. Never the raw event type: an event
+    this table doesn't know yet still reads as words ("analysis.completed"
+    -> "Analysis completed")."""
+    if event_type == "filing.failed":
+        step = (payload or {}).get("step", "")
+        return f"Failed at {STEP_LABELS.get(step, step.replace('_', ' ') or 'an unknown step')}"
+    if event_type in EVENT_LABELS:
+        return EVENT_LABELS[event_type]
+    return event_type.replace(".", " ").replace("_", " ").capitalize()
+
+
+def event_subject(event: dict) -> str:
+    entity = event.get("entity_id", "")
+    return EVENT_SUBJECTS.get(entity, entity)
 
 
 def event_detail(event: dict) -> str:
     payload = event.get("payload") or {}
+    kind = event.get("type", "")
+    if kind in ("filing.failed", "company.refresh_failed", "ingest.failed"):
+        attempts = payload.get("attempts")
+        tries = f" (after {_plural(attempts, 'attempt')})" if attempts and attempts > 1 else ""
+        return f"{payload.get('error', 'Unknown error')}{tries}"
+    if kind == "company.refreshed":
+        return _plural(payload.get("facts", 0), "financial fact")
+    if kind == "ingest.completed":
+        return _plural(payload.get("inserted", 0), "new filing")
+    if kind == "filing.requeued":
+        return f"Was stuck at: {status_label(payload.get('from_status', ''))[0]}"
+    if kind == "filing.recovery_reset":
+        reason = payload.get("reason", "")
+        return RESET_REASONS.get(reason, reason)
+    if kind == "pipeline.reconciled":
+        retried = payload.get("requeued", 0)
+        text = f"{_plural(retried, 'stuck filing')} retried" if retried else "Nothing stuck"
+        attention = payload.get("needs_attention", 0)
+        return text + (f"; {attention} need attention" if attention else "")
     if "chunk_count" in payload:
         n = payload["chunk_count"]
         return f"{n} passage{'s' if n != 1 else ''} indexed"
@@ -156,6 +221,16 @@ def event_detail(event: dict) -> str:
         form = payload.get("form_type")
         return f"{payload['ticker']} {form}" if form else payload["ticker"]
     return ""
+
+
+# /readyz keys -> display names, in the order the dashboard shows them.
+DEPENDENCY_LABELS: dict[str, str] = {"postgres": "Postgres", "redis": "Redis", "qdrant": "Qdrant"}
+
+
+def dependency_status(readiness: dict) -> list[tuple[str, bool]]:
+    """(name, is_ok) per dependency, from /readyz's body. A dependency the
+    API didn't report counts as down rather than silently missing."""
+    return [(label, readiness.get(key) == "ok") for key, label in DEPENDENCY_LABELS.items()]
 
 
 # --- numbers -------------------------------------------------------------------
