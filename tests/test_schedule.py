@@ -20,6 +20,8 @@ def test_beat_schedule_points_at_a_registered_task():
 
 
 def test_scheduled_ingest_resolves_tickers_at_run_time(monkeypatch):
+    """...and enqueues ingest_watchlist through the broker rather than
+    calling it in-process, so the scheduled run gets its retry policy."""
     calls: list = []
     monkeypatch.setattr(
         tasks,
@@ -27,12 +29,12 @@ def test_scheduled_ingest_resolves_tickers_at_run_time(monkeypatch):
         lambda: SimpleNamespace(default_universe=["AAPL", "MSFT"], ingest_limit_per_ticker=7),
     )
     monkeypatch.setattr(
-        tasks,
-        "ingest_watchlist",
-        lambda tickers, limit: calls.append((tickers, limit)) or {"inserted": 0},
+        tasks.ingest_watchlist,
+        "delay",
+        lambda tickers, limit: calls.append((tickers, limit)) or SimpleNamespace(id="task-1"),
     )
 
     result = tasks.scheduled_ingest()
 
     assert calls == [(["AAPL", "MSFT"], 7)]
-    assert result == {"inserted": 0}
+    assert result == {"task_id": "task-1"}

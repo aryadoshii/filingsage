@@ -29,10 +29,11 @@ from testcontainers.postgres import PostgresContainer
 import filingsage.db.session as db_session
 import filingsage.gold.vector_store as vector_store
 import filingsage.worker.tasks as tasks
-from filingsage.connectors.edgar import EdgarClient, EdgarConnector
+from filingsage.connectors.edgar import EdgarClient, EdgarConnector, UnknownTickerError
 from filingsage.db.events import emit_event
 from filingsage.db.models import Chunk as ChunkRow
 from filingsage.db.models import Company, Event, Filing, FilingStatus
+from filingsage.worker.retry import MAX_RETRIES
 
 pytestmark = pytest.mark.integration
 
@@ -98,12 +99,22 @@ def _submissions(accessions, forms, filed_dates, docs):
 
 
 class Handler:
-    """MockTransport handler: ticker map + submissions + archives, by accession."""
+    """MockTransport handler: ticker map + submissions + archives, by accession.
 
-    def __init__(self, submissions: dict, filing_bytes: dict[str, bytes]):
+    `archive_failures` are served, in order, for the first document
+    requests — an exception is raised (a transport error), a Response is
+    returned — before documents are served normally.
+    """
+
+    def __init__(self, submissions: dict, filing_bytes: dict[str, bytes], archive_failures=()):
         self.requests: list[httpx.Request] = []
         self._submissions = submissions
         self._filing_bytes = filing_bytes
+        self._archive_failures = list(archive_failures)
+
+    @property
+    def archive_requests(self) -> int:
+        return sum("/Archives/" in str(r.url) for r in self.requests)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -112,6 +123,11 @@ class Handler:
             return httpx.Response(200, json=TICKER_FIXTURE)
         if "/submissions/" in url:
             return httpx.Response(200, json=self._submissions)
+        if "/Archives/" in url and self._archive_failures:
+            failure = self._archive_failures.pop(0)
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
         if "/Archives/" in url:
             for accession, content in self._filing_bytes.items():
                 if accession.replace("-", "") in url:
@@ -119,8 +135,8 @@ class Handler:
         return httpx.Response(404)
 
 
-def _make_connector(tmp_path, submissions, filing_bytes):
-    handler = Handler(submissions, filing_bytes)
+def _make_connector(tmp_path, submissions, filing_bytes, archive_failures=()):
+    handler = Handler(submissions, filing_bytes, archive_failures)
     client = EdgarClient(
         contact_email="arya@test.dev",
         max_per_second=10_000,
@@ -182,8 +198,8 @@ def _wire_vector_store(monkeypatch):
 def wire_connector(tmp_path, monkeypatch):
     """Wire tasks._connector()/get_settings() to a fake EDGAR + tmp data dir."""
 
-    def _wire(submissions, filing_bytes):
-        connector, handler = _make_connector(tmp_path, submissions, filing_bytes)
+    def _wire(submissions, filing_bytes, archive_failures=()):
+        connector, handler = _make_connector(tmp_path, submissions, filing_bytes, archive_failures)
         monkeypatch.setattr(tasks, "_connector", lambda: connector)
         monkeypatch.setattr(tasks, "get_settings", lambda: _FakeSettings(tmp_path))
         return connector, handler
@@ -289,6 +305,13 @@ def test_qdrant_failure_on_a_later_batch_leaves_status_not_embedded(wire_connect
         ).all()
         assert chunk_rows == []
 
+    # ...and the failure itself is on record, in its own transaction, which
+    # the rollback above didn't take with it. RuntimeError isn't transient,
+    # so there was exactly one attempt.
+    assert _failures(accession_no) == [
+        {"step": "embed", "error": "RuntimeError: simulated Qdrant upsert failure", "attempts": 1}
+    ]
+
 
 def test_ingest_is_idempotent_on_rerun(wire_connector):
     submissions = _submissions(["0000900001-26-000002"], ["8-K"], ["2026-06-02"], ["a.htm"])
@@ -358,3 +381,121 @@ def test_status_change_and_event_commit_or_rollback_together():
         event = session.scalar(select(Event).where(Event.entity_id == "acc-atomic"))
         assert filing.status == FilingStatus.DISCOVERED.value  # status change rolled back
         assert event is None  # event rolled back too — never both-or-neither violated
+
+
+# --- retries and failure events (decision #37) --------------------------------
+
+
+def _failures(entity_id: str, event_type: str = "filing.failed") -> list[dict]:
+    with db_session.session_scope() as session:
+        return [
+            e.payload_json
+            for e in session.scalars(
+                select(Event)
+                .where(Event.entity_id == entity_id, Event.type == event_type)
+                .order_by(Event.id)
+            )
+        ]
+
+
+def _status(accession_no: str) -> str:
+    with db_session.session_scope() as session:
+        return session.scalar(select(Filing.status).where(Filing.accession_no == accession_no))
+
+
+@pytest.fixture
+def eager_retries(monkeypatch):
+    """Let Celery's eager mode actually run retries. With
+    task_eager_propagates on (this module's default) the tracer re-raises
+    Celery's Retry exception to the caller instead of re-running the task;
+    off, apply() re-runs it with retries + 1 — what a worker does after the
+    countdown. A final failure then lands as a FAILURE result rather than an
+    exception in the test, so these tests assert on events, not raises."""
+    monkeypatch.setitem(tasks.celery_app.conf, "task_eager_propagates", False)
+
+
+def test_a_transient_fetch_error_is_retried_and_the_chain_completes(wire_connector, eager_retries):
+    accession_no = "0000900001-26-000020"
+    _, handler = wire_connector(
+        _submissions([accession_no], ["8-K"], ["2026-06-20"], ["a.htm"]),
+        {accession_no: HAPPY_8K},
+        archive_failures=[httpx.ConnectError("connection reset by peer")],
+    )
+
+    tasks.ingest_watchlist(["ACME"], limit=None)
+
+    assert handler.archive_requests == 2  # failed once, retried once
+    assert _status(accession_no) == FilingStatus.EMBEDDED.value
+    assert _failures(accession_no) == []  # a recovered retry isn't a failure
+
+
+def test_a_fetch_that_keeps_failing_records_one_event_after_the_last_retry(
+    wire_connector, eager_retries
+):
+    accession_no = "0000900001-26-000021"
+    _, handler = wire_connector(
+        _submissions([accession_no], ["8-K"], ["2026-06-21"], ["a.htm"]),
+        {accession_no: HAPPY_8K},
+        archive_failures=[httpx.ConnectError("network is unreachable")] * 10,
+    )
+
+    tasks.ingest_watchlist(["ACME"], limit=None)
+
+    assert handler.archive_requests == MAX_RETRIES + 1
+    assert _failures(accession_no) == [
+        {"step": "fetch", "error": "ConnectError: network is unreachable", "attempts": MAX_RETRIES + 1}
+    ]
+    assert _status(accession_no) == FilingStatus.DISCOVERED.value  # left for the reconciler
+
+
+def test_a_non_transient_fetch_error_fails_once_without_retrying(wire_connector):
+    accession_no = "0000900001-26-000022"
+    _, handler = wire_connector(
+        _submissions([accession_no], ["8-K"], ["2026-06-22"], ["a.htm"]),
+        {accession_no: HAPPY_8K},
+        archive_failures=[httpx.Response(404)],
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        tasks.ingest_watchlist(["ACME"], limit=None)
+
+    assert handler.archive_requests == 1
+    [failure] = _failures(accession_no)
+    assert (failure["step"], failure["attempts"]) == ("fetch", 1)
+    assert failure["error"].startswith("HTTPStatusError: Client error '404 Not Found'")
+
+
+def test_a_parse_crash_is_recorded_without_touching_the_status(wire_connector, tmp_path):
+    """Bronze gone from disk: FileNotFoundError is deterministic, so one
+    attempt, one failure event, and the filing stays FETCHED for the
+    reconciler to reset."""
+    wire_connector(_submissions([], [], [], []), {})
+    accession_no = "0000900001-26-000023"
+    with db_session.session_scope() as session:
+        if session.get(Company, 900001) is None:
+            session.add(Company(cik=900001, ticker="ACME", name="Acme Corp"))
+            session.flush()
+        session.add(Filing(
+            cik=900001, accession_no=accession_no, form_type="8-K", filed_at=date(2026, 6, 23),
+            primary_document="a.htm", status=FilingStatus.FETCHED.value,
+            r2_bronze_key=str(tmp_path / "missing.htm"),
+        ))
+
+    with pytest.raises(FileNotFoundError):
+        tasks.parse_filing.delay(accession_no)
+
+    [failure] = _failures(accession_no)
+    assert (failure["step"], failure["attempts"]) == ("parse", 1)
+    assert failure["error"].startswith("FileNotFoundError:")
+    assert _status(accession_no) == FilingStatus.FETCHED.value
+
+
+def test_a_discovery_failure_records_an_ingest_failed_event(wire_connector):
+    wire_connector(_submissions([], [], [], []), {})
+
+    with pytest.raises(UnknownTickerError):
+        tasks.ingest_watchlist(["NOPE"], limit=None)
+
+    last = _failures("watchlist", "ingest.failed")[-1]
+    assert (last["step"], last["attempts"], last["tickers"]) == ("ingest", 1, 1)
+    assert last["error"].startswith("UnknownTickerError:")

@@ -128,3 +128,30 @@ def test_ingest_enqueues_a_refresh_for_new_10k_filings(monkeypatch):
     with db_session.session_scope() as s:
         tenk = s.scalar(select(Filing).where(Filing.accession_no == "0000900001-25-000002"))
         assert tenk.items is None  # 10-Ks have no item codes; empty string stored as NULL
+
+
+def test_a_failed_refresh_records_company_refresh_failed(monkeypatch, tmp_path):
+    """EDGAR answering 404 is deterministic: one attempt, then a
+    company.refresh_failed event keyed by ticker like company.refreshed is.
+    Called as a plain function (as the CLI does), so no retry either way."""
+    _seed_company_with_an_old_8k()
+    client = EdgarClient(
+        contact_email="arya@test.dev", max_per_second=10_000,
+        transport=httpx.MockTransport(lambda request: httpx.Response(404)), sleep=lambda _: None,
+    )
+    monkeypatch.setattr(
+        tasks, "_connector", lambda: EdgarConnector(client, bronze_dir=tmp_path / "bronze")
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        tasks.refresh_company(CIK)
+
+    with db_session.session_scope() as s:
+        event = s.scalars(
+            select(Event).where(Event.type == "company.refresh_failed").order_by(Event.id.desc())
+        ).first()
+        assert event.entity_id == "ACME"
+        assert {k: event.payload_json[k] for k in ("step", "attempts", "cik")} == {
+            "step": "refresh", "attempts": 1, "cik": CIK,
+        }
+        assert event.payload_json["error"].startswith("HTTPStatusError:")
